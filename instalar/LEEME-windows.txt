@@ -1,0 +1,41 @@
+REBANADA — sampler de rebanadas
+Instalación en Windows 10 y 11 (64 bits)
+
+1. Descomprimí este paquete en una carpeta (clic derecho > «Extraer todo»).
+   No lo ejecutes desde adentro del .zip.
+
+2. Hacé doble clic en Instalar-Rebanada.bat y aceptá el pedido de permisos
+   de administrador.
+
+   Como Rebanada no está firmado por Microsoft, puede aparecer el aviso
+   «Windows protegió su PC». Tocá «Más información» y después «Ejecutar de todas formas».
+
+3. En Reaper: Options > Preferences > Plug-ins > VST > «Re-scan».
+   Rebanada aparece como instrumento VST3 y CLAP, en «Lautaro Martin Vieyra».
+
+Qué se instala
+  Rebanada.vst3   C:\Program Files\Common Files\VST3
+  Rebanada.clap   C:\Program Files\Common Files\CLAP
+  Rebanada.exe    %LOCALAPPDATA%\Programs\Rebanada   (aplicación independiente,
+                  con acceso directo en el menú Inicio)
+
+Para desinstalar, borrá esos archivos y el acceso directo.
+
+Primeros pasos
+  - Insertá Rebanada como instrumento en una pista y soltá un archivo de audio
+    sobre la pantalla (o hacé clic en ella para elegirlo).
+  - Con el transporte de Reaper en marcha, el loop suena sincronizado al tempo.
+  - Las notas desde Do2 (C2) tocan cada rebanada; Do0–Sol0 (C0–G0) eligen el loop.
+  - Arrastrá «Drag MIDI to track» a una pista para tener el loop como notas.
+
+Salidas separadas
+  Cada rebanada puede ir a su propio par de salidas (Out 3–4 … 15–16).
+  En Reaper, abrí el botón de enrutamiento del plugin («2 in 2 out») y
+  mandá esas salidas a otras pistas.
+
+La aplicación independiente toca el loop con su propio tempo
+(arrastrá el número de BPM para cambiarlo) y acepta un teclado MIDI:
+elegilo en «Options» (modo WASAPI para la placa de audio).
+
+Código fuente y versiones nuevas: https://github.com/ChaLau767/rebanada
+Licencia: GNU AGPL 3.0. Podés usarlo, compartirlo y modificarlo libremente.

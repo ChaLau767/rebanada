@@ -1,0 +1,128 @@
+// Development test: loads the built VST3 the way a DAW does, checks the output layouts,
+// opens the interface and saves the session. Playback is tested with rebanada_snapshot --play.
+// Only built with -DREBANADA_SNAPSHOT=ON.
+
+#include <juce_audio_processors/juce_audio_processors.h>
+#include <juce_audio_formats/juce_audio_formats.h>
+#include <juce_events/juce_events.h>
+#include <cstdio>
+
+static int failures = 0;
+static const bool unbuffered = [] { std::setvbuf (stdout, nullptr, _IONBF, 0); return true; }();
+static void check (bool ok, const juce::String& what)
+{
+    std::printf ("%s  %s\n", ok ? "ok  " : "FAIL", what.toRawUTF8());
+    if (! ok) ++failures;
+}
+
+struct PlayHead : juce::AudioPlayHead
+{
+    double ppq = 0.0;
+    bool playing = true;
+    juce::Optional<PositionInfo> getPosition() const override
+    {
+        PositionInfo p;
+        p.setIsPlaying (playing);
+        p.setBpm (100.0);
+        p.setPpqPosition (ppq);
+        p.setTimeSignature (TimeSignature { 4, 4 });
+        return p;
+    }
+};
+
+[[maybe_unused]] static juce::File writeLoop()
+{
+    const double sr = 48000.0;
+    const int len = (int) (sr * 2.4);
+    juce::AudioBuffer<float> buf (1, len);
+    buf.clear();
+    for (int h = 0; h < 8; ++h)
+        for (int i = 0; i < len / 8; ++i)
+        {
+            const double t = i / sr;
+            buf.setSample (0, h * len / 8 + i, (float) (0.7 * std::exp (-t * 20.0) * std::sin (2.0 * juce::MathConstants<double>::pi * (100.0 + 40.0 * h) * t)));
+        }
+    auto f = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("rebanada-hosttest.wav");
+    f.deleteFile();
+    juce::WavAudioFormat wav;
+    std::unique_ptr<juce::AudioFormatWriter> w (wav.createWriterFor (new juce::FileOutputStream (f), sr, 1, 16, {}, 0));
+    if (w != nullptr) w->writeFromAudioSampleBuffer (buf, 0, len);
+    return f;
+}
+
+int main (int argc, char** argv)
+{
+    juce::ScopedJuceInitialiser_GUI gui;
+    if (argc < 2) { std::printf ("usage: rebanada_hosttest <path to Rebanada.vst3>\n"); return 2; }
+
+    juce::AudioPluginFormatManager formats;
+    formats.addFormat (new juce::VST3PluginFormat());
+    juce::OwnedArray<juce::PluginDescription> found;
+    juce::VST3PluginFormat vst3;
+    vst3.findAllTypesForFile (found, argv[1]);
+    check (found.size() == 1, "plugin found in the VST3 bundle");
+    if (found.isEmpty()) return 1;
+    check (found[0]->isInstrument, "it is an instrument");
+
+    juce::String error;
+    auto plugin = formats.createPluginInstance (*found[0], 48000.0, 512, error);
+    check (plugin != nullptr, "plugin instance created " + error);
+    if (plugin == nullptr) return 1;
+
+    check (plugin->getBusCount (false) == 8, "eight output buses: main plus seven extra pairs (" + juce::String (plugin->getBusCount (false)) + ")");
+    {
+        juce::AudioProcessor::BusesLayout layout;
+        for (int i = 0; i < plugin->getBusCount (false); ++i) layout.outputBuses.add (juce::AudioChannelSet::stereo());
+        check (plugin->setBusesLayout (layout) && plugin->getTotalNumOutputChannels() == 16, "all sixteen outputs enabled");
+    }
+    {
+        juce::AudioProcessor::BusesLayout layout;
+        layout.outputBuses.add (juce::AudioChannelSet::stereo());
+        for (int i = 1; i < plugin->getBusCount (false); ++i) layout.outputBuses.add (juce::AudioChannelSet::disabled());
+        check (plugin->setBusesLayout (layout) && plugin->getTotalNumOutputChannels() == 2, "back to stereo");
+    }
+
+    PlayHead head;
+    plugin->setPlayHead (&head);
+    plugin->prepareToPlay (48000.0, 512);
+
+    // an empty instrument: notes and transport, no sound and no crash
+    {
+        juce::AudioBuffer<float> buf (2, 512);
+        bool finite = true;
+        float peak = 0.0f;
+        for (int b = 0; b < 200; ++b)
+        {
+            buf.clear();
+            juce::MidiBuffer midi;
+            if (b % 10 == 0) midi.addEvent (juce::MidiMessage::noteOn (1, 36 + b % 24, (juce::uint8) 100), 3);
+            if (b % 10 == 5) midi.addEvent (juce::MidiMessage::noteOn (1, 12 + (b / 10) % 8, (juce::uint8) 100), 0);
+            plugin->processBlock (buf, midi);
+            for (int ch = 0; ch < 2; ++ch)
+                for (int i = 0; i < 512; ++i) { const float v = buf.getSample (ch, i); if (! std::isfinite (v)) finite = false; peak = juce::jmax (peak, std::abs (v)); }
+            head.ppq += 100.0 / 60.0 * 512 / 48000.0;
+        }
+        check (finite && peak < 1.0e-6f, "an empty instrument stays silent with notes and transport");
+    }
+
+    // the interface opens and closes inside the host
+    {
+        std::unique_ptr<juce::AudioProcessorEditor> editor (plugin->createEditorIfNeeded());
+        check (editor != nullptr && editor->getWidth() > 500, "the interface opens");
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (200);
+        editor.reset();
+    }
+
+    // the session survives a save and reload through the VST3 format
+    {
+        juce::MemoryBlock saved;
+        plugin->getStateInformation (saved);
+        plugin->setStateInformation (saved.getData(), (int) saved.getSize());
+        check (saved.getSize() > 100, "the session saves and reloads (" + juce::String ((int) saved.getSize()) + " bytes)");
+    }
+
+    plugin->releaseResources();
+    plugin.reset();
+    std::printf (failures == 0 ? "\nall host tests passed\n" : "\n%d host tests failed\n", failures);
+    return failures == 0 ? 0 : 1;
+}
