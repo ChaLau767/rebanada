@@ -117,7 +117,7 @@ int main()
 
     // reverse, pitch, decay, filter: all stay finite
     for (auto& sp : slot.slices) { sp.reverse = true; sp.pitch = 7.0f; sp.filter = -1.0f; }
-    p.filterType = 1; p.cutoff = 1200.0f; p.reso = 80.0f; p.lfoDepth = 60.0f; p.lfoDest = 1;
+    { auto& l = p.loops[0]; l.filterType = 1; l.cutoff = 1200.0f; l.reso = 80.0f; l.lfoDepth = 60.0f; l.lfoDest = 1; }
     e.reset();
     r = render (e, p, host, 200);
     check (r.finite && r.peak > 0.05f && r.peak < 4.0f, "reverse, pitch, decay and resonant filter stay finite");
@@ -133,7 +133,7 @@ int main()
 
     // free mode at half rate
     e.reset();
-    p.mode = 1; p.rate = 0.5f;
+    p.loops[0].mode = 1; p.loops[0].rate = 0.5f;
     r = render (e, p, host, 300);
     check (r.finite && r.peak > 0.3f, "free mode plays");
     p = Params {};
@@ -178,7 +178,7 @@ int main()
     e.reset();
     e.requestSlot (0);
     render (e, p, stopped, 1);
-    for (auto& sp : slot.slices) sp.out = 1;
+    for (auto& sp : slot.slices) sp.out = 2;
     {
         const int n = 512, outs = 4;
         std::vector<std::vector<float>> buf (outs, std::vector<float> (n));
@@ -191,6 +191,44 @@ int main()
             for (int i = 0; i < n; ++i) { p01 = std::max (p01, std::abs (buf[0][i])); p23 = std::max (p23, std::abs (buf[2][i])); }
         }
         check (p23 > 0.3f && p01 < 1.0e-6f, "a slice sent to Out 3-4 sounds only there");
+    }
+
+    // a mono slice on channel 6 sounds only there
+    e.reset();
+    for (auto& sp : slot.slices) { sp.out = 5; sp.stereo = false; }
+    {
+        const int n = 512, outs = 64;
+        std::vector<std::vector<float>> buf (outs, std::vector<float> (n));
+        std::vector<float*> ptr; for (auto& b : buf) ptr.push_back (b.data());
+        Event on { Event::noteOn, 0, sliceBaseNote, 1.0f };
+        std::vector<float> pk (outs, 0.0f);
+        for (int b = 0; b < 20; ++b)
+        {
+            e.process (ptr.data(), outs, n, p, stopped, b == 0 ? &on : nullptr, b == 0 ? 1 : 0);
+            for (int c = 0; c < outs; ++c) for (int i = 0; i < n; ++i) pk[(size_t) c] = std::max (pk[(size_t) c], std::abs (buf[(size_t) c][(size_t) i]));
+        }
+        int others = 0; for (int c = 0; c < outs; ++c) if (c != 5 && pk[(size_t) c] > 1.0e-6f) ++others;
+        check (pk[5] > 0.2f && others == 0, "a mono slice on channel 6 of 64 sounds only there");
+    }
+    // with only two channels, a slice sent beyond them falls back to 1-2
+    e.reset();
+    for (auto& sp : slot.slices) { sp.out = 40; sp.stereo = true; }
+    r = render (e, p, stopped, 20, 512, { { Event::noteOn, 0, sliceBaseNote, 1.0f } });
+    check (r.peak > 0.2f, "a slice sent beyond the available channels falls back to 1-2");
+    for (auto& sp : slot.slices) sp = SliceParams {};
+
+    // every loop has its own filter: a closed filter on loop 1 does not touch loop 2
+    {
+        Params q;
+        q.loops[0].filterType = 0; q.loops[0].cutoff = 40.0f;
+        e.reset();
+        e.requestSlot (0);
+        render (e, q, stopped, 1);
+        const float closed = render (e, q, stopped, 20, 512, { { Event::noteOn, 0, sliceBaseNote, 1.0f } }).peak;
+        e.requestSlot (1);
+        render (e, q, stopped, 1);
+        const float open = render (e, q, stopped, 20, 512, { { Event::noteOn, 0, sliceBaseNote, 1.0f } }).peak;
+        check (closed < 0.4f * open && open > 0.3f, "each loop keeps its own filter");
     }
 
     // voice stealing: many notes at once

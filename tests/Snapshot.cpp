@@ -5,6 +5,7 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_gui_basics/juce_gui_basics.h>
 #include "PluginProcessor.h"
+#include "PluginEditor.h"
 #include <cstdio>
 
 // A two-bar test loop: kick, snare and hats with different pitches.
@@ -63,7 +64,7 @@ int main (int argc, char** argv)
         juce::String error;
         const bool loaded = a.loadFile (3, writeTestLoop ("rebanada-state.wav", 0), error);
         auto sp = a.getSlice (3, 2);
-        sp.pitch = 5.0f; sp.reverse = true; sp.out = 1;
+        sp.pitch = 5.0f; sp.reverse = true; sp.out = 7; sp.stereo = false;
         a.setSlice (3, 2, sp);
         a.setBars (3, 4);
         const int slices = a.slotInfo (3).numSlices;
@@ -75,10 +76,30 @@ int main (int argc, char** argv)
         const auto info = b.slotInfo (3);
         const auto back = b.getSlice (3, 2);
         const bool ok = loaded && info.loaded() && info.numSlices == slices && info.bars == 4
-                        && back.pitch == 5.0f && back.reverse && back.out == 1;
-        std::printf ("%s  session restored: %d slices, %d bars, slice 3 pitch %.1f\n", ok ? "ok  " : "FAIL",
-                     info.numSlices, info.bars, (double) back.pitch);
-        return ok ? 0 : 1;
+                        && back.pitch == 5.0f && back.reverse && back.out == 7 && ! back.stereo;
+        std::printf ("%s  session restored: %d slices, %d bars, slice 3 pitch %.1f, mono channel %d\n", ok ? "ok  " : "FAIL",
+                     info.numSlices, info.bars, (double) back.pitch, back.out + 1);
+
+        // a session saved by 0.1: shared settings go to every loop, output pairs become channels
+        juce::XmlElement old ("REBANADA");
+        auto* cut = old.createNewChildElement ("PARAM"); cut->setAttribute ("id", "cutoff"); cut->setAttribute ("value", 500.0);
+        auto* ord = old.createNewChildElement ("PARAM"); ord->setAttribute ("id", "order"); ord->setAttribute ("value", 2.0);
+        auto* sl = old.createNewChildElement ("SLOTS")->createNewChildElement ("SLOT");
+        sl->setAttribute ("index", 1);
+        sl->setAttribute ("path", writeTestLoop ("rebanada-old.wav", 1).getFullPathName());
+        sl->setAttribute ("bars", 2);
+        sl->setAttribute ("slices", "0 0 0 0 0 2000 0 0 0 3;44100 0 0 0 0 2000 0 0 0 0");
+        juce::MemoryBlock oldBlock;
+        juce::AudioProcessor::copyXmlToBinary (old, oldBlock);
+        RebanadaProcessor c;
+        c.setStateInformation (oldBlock.getData(), (int) oldBlock.getSize());
+        const float c3 = c.apvts.getRawParameterValue ("L3_cutoff")->load();
+        const int o8 = (int) c.apvts.getRawParameterValue ("L8_order")->load();
+        const auto first = c.getSlice (1, 0);
+        const bool ok2 = std::abs (c3 - 500.0f) < 1.0f && o8 == 2 && first.out == 6 && first.stereo;
+        std::printf ("%s  0.1 session: cutoff %.0f on loop 3, order %d on loop 8, pair 4 became channels %d-%d\n", ok2 ? "ok  " : "FAIL",
+                     (double) c3, o8, first.out + 1, first.out + 2);
+        return ok && ok2 ? 0 : 1;
     }
 
     if (argc > 1 && juce::String (argv[1]) == "--play")
@@ -99,15 +120,15 @@ int main (int argc, char** argv)
 
         RebanadaProcessor proc;
         juce::AudioProcessor::BusesLayout layout;
-        for (int i = 0; i < proc.getBusCount (false); ++i) layout.outputBuses.add (i < 2 ? juce::AudioChannelSet::stereo() : juce::AudioChannelSet::disabled());
-        check (proc.setBusesLayout (layout) && proc.getTotalNumOutputChannels() == 4, "main and Out 3-4 enabled");
+        layout.outputBuses.add (juce::AudioChannelSet::discreteChannels (4));
+        check (proc.setBusesLayout (layout) && proc.getTotalNumOutputChannels() == 4, "four output channels");
         proc.setPlayHead (&head);
         proc.prepareToPlay (48000.0, 512);
         juce::String error;
         check (proc.loadFile (0, writeTestLoop ("rebanada-play.wav", 0), error), "the loop loads " + error);
         const int slices = proc.slotInfo (0).numSlices;
         check (slices >= 8 && slices <= 16, "the loop is cut into " + juce::String (slices) + " slices");
-        auto sp = proc.getSlice (0, 1); sp.out = 1; proc.setSlice (0, 1, sp);
+        auto sp = proc.getSlice (0, 1); sp.out = 2; sp.stereo = true; proc.setSlice (0, 1, sp);
 
         auto play = [&] (int blocks, int note) {
             juce::AudioBuffer<float> buf (4, 512);
@@ -151,9 +172,11 @@ int main (int argc, char** argv)
     const int width  = argc > 3 ? juce::String (argv[3]).getIntValue() : 1200;
     const int height = argc > 4 ? juce::String (argv[4]).getIntValue() : 780;
     const bool empty = argc > 5 && juce::String (argv[5]) == "empty";
+    const bool zoom = argc > 5 && juce::String (argv[5]) == "zoom";
+    const int outs = argc > 6 ? juce::String (argv[6]).getIntValue() : 2;
 
     auto proc = std::make_unique<RebanadaProcessor>();
-    proc->setPlayConfigDetails (0, 2, 44100.0, 512);
+    proc->setPlayConfigDetails (0, outs, 44100.0, 512);
     if (spanish) proc->setLanguage (rebanada::Lang::es);
     proc->prepareToPlay (44100.0, 512);
     if (! empty)
@@ -174,6 +197,15 @@ int main (int argc, char** argv)
     std::unique_ptr<juce::AudioProcessorEditor> editor (proc->createEditor());
     editor->setSize (width, height);
     run (*proc, 140);
+    if (zoom)
+    {
+        std::function<rebanada::rack::WaveView* (juce::Component*)> find = [&] (juce::Component* c) -> rebanada::rack::WaveView* {
+            if (auto* w = dynamic_cast<rebanada::rack::WaveView*> (c)) return w;
+            for (auto* child : c->getChildren()) if (auto* w = find (child)) return w;
+            return nullptr;
+        };
+        if (auto* w = find (editor.get())) w->zoomAround (44100.0 * 1.1, 0.3);
+    }
     for (int i = 0; i < 10; ++i)
     {
         run (*proc, 3);

@@ -90,7 +90,7 @@ public:
 
     bool readTelemetry (rebanada::Telemetry& dest);
     int getVersion() const { return version.load(); }
-    bool pairActive (int pair) const;    // is that output pair enabled by the host?
+    int numOutputs() const { return getTotalNumOutputChannels(); }
 
     juce::AudioProcessorValueTreeState apvts;
     juce::MidiKeyboardState keyboard;    // notes played on the interface's keys
@@ -126,11 +126,16 @@ private:
     juce::SpinLock telemetryLock;
     int samplesSinceTelemetry = 0;
 
-    struct Refs
+    struct LoopRefs
     {
         std::atomic<float> *chance, *repeat, *lfoRate, *lfoDepth, *attack, *decay, *sustain, *release, *cutoff, *reso,
-                           *transpose, *gain, *rate, *tempo, *mode, *switchAt, *order, *lfoDest, *filterType, *play;
-    } refs {};
+                           *transpose, *rate, *level, *mode, *order, *lfoDest, *filterType;
+    };
+    struct Refs
+    {
+        std::atomic<float> *gain = nullptr, *tempo = nullptr, *switchAt = nullptr, *play = nullptr;
+        std::array<LoopRefs, rebanada::maxSlots> loops {};
+    } refs;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (RebanadaProcessor)
 };

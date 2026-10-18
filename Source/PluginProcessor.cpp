@@ -20,12 +20,14 @@ namespace
             const auto& p = s.slices[(size_t) i];
             rows.add (juce::String (s.starts[(size_t) i]) + " " + juce::String (p.pitch, 2) + " " + juce::String (p.fine, 1) + " "
                       + juce::String (p.level, 2) + " " + juce::String (p.pan, 3) + " " + juce::String (p.decay, 1) + " "
-                      + juce::String (p.filter, 2) + " " + (p.reverse ? "1" : "0") + " " + (p.mute ? "1" : "0") + " " + juce::String (p.out));
+                      + juce::String (p.filter, 2) + " " + (p.reverse ? "1" : "0") + " " + (p.mute ? "1" : "0") + " " + juce::String (p.out)
+                      + " " + (p.stereo ? "1" : "0"));
         }
         return rows.joinIntoString (";");
     }
 
-    void decodeSlices (Slot& s, const juce::String& text)
+    // format 1 (Rebanada 0.1): the output was a stereo pair; format 2: a channel, mono or stereo
+    void decodeSlices (Slot& s, const juce::String& text, int format)
     {
         auto rows = juce::StringArray::fromTokens (text, ";", "");
         rows.removeEmptyStrings();
@@ -47,20 +49,18 @@ namespace
             p.filter = juce::jlimit (-4.0f, 4.0f, f[6].getFloatValue());
             p.reverse = f[7].getIntValue() != 0;
             p.mute = f[8].getIntValue() != 0;
-            p.out = juce::jlimit (0, maxPairs - 1, f[9].getIntValue());
+            if (format < 2) { p.out = juce::jlimit (0, 7, f[9].getIntValue()) * 2; p.stereo = true; }
+            else { p.out = juce::jlimit (0, maxOutputs - 1, f[9].getIntValue()); p.stereo = f.size() < 11 || f[10].getIntValue() != 0; }
             ++n;
         }
         if (n > 0) s.numSlices = n;
     }
 }
 
-// Main output plus seven optional stereo outputs, for slices sent to their own tracks.
+// One output bus with as many channels as the track has (up to 64); stereo by default.
 juce::AudioProcessor::BusesProperties RebanadaProcessor::buses()
 {
-        auto b = BusesProperties().withOutput ("Main 1-2", juce::AudioChannelSet::stereo(), true);
-        for (int p = 1; p < maxPairs; ++p)
-            b = b.withOutput ("Out " + juce::String (p * 2 + 1) + "-" + juce::String (p * 2 + 2), juce::AudioChannelSet::stereo(), false);
-        return b;
+    return BusesProperties().withOutput ("Output", juce::AudioChannelSet::stereo(), true);
 }
 
 RebanadaProcessor::RebanadaProcessor()
@@ -68,29 +68,24 @@ RebanadaProcessor::RebanadaProcessor()
       apvts (*this, nullptr, "REBANADA", createLayout())
 {
     formats.registerBasicFormats();
-    auto r = [this] (const char* id) { return apvts.getRawParameterValue (id); };
-    refs = { r ("chance"), r ("repeat"), r ("lfoRate"), r ("lfoDepth"), r ("attack"), r ("decay"), r ("sustain"), r ("release"),
-             r ("cutoff"), r ("reso"), r ("transpose"), r ("gain"), r ("rate"), r ("tempo"), r ("mode"), r ("switchAt"),
-             r ("order"), r ("lfoDest"), r ("filterType"), r ("play") };
+    auto r = [this] (const juce::String& id) { return apvts.getRawParameterValue (id); };
+    refs.gain = r ("gain"); refs.tempo = r ("tempo"); refs.switchAt = r ("switchAt"); refs.play = r ("play");
+    for (int l = 0; l < maxSlots; ++l)
+    {
+        auto& L = refs.loops[(size_t) l];
+        auto q = [&] (const char* base) { return r (loopId (l, base)); };
+        L = { q ("chance"), q ("repeat"), q ("lfoRate"), q ("lfoDepth"), q ("attack"), q ("decay"), q ("sustain"), q ("release"),
+              q ("cutoff"), q ("reso"), q ("transpose"), q ("rate"), q ("level"), q ("mode"), q ("order"), q ("lfoDest"), q ("filterType") };
+    }
     if (! apvts.state.hasProperty ("lang")) apvts.state.setProperty ("lang", 0, nullptr);
 }
 
 bool RebanadaProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
 {
+    // any output count from 1 to 64, whatever the host calls the channels
     if (! layouts.inputBuses.isEmpty() && layouts.getMainInputChannels() != 0) return false;
-    if (layouts.outputBuses.isEmpty()) return false;
-    const auto main = layouts.outputBuses[0];
-    if (main != juce::AudioChannelSet::stereo() && main != juce::AudioChannelSet::mono()) return false;
-    for (int i = 1; i < layouts.outputBuses.size(); ++i)
-        if (! layouts.outputBuses[i].isDisabled() && layouts.outputBuses[i] != juce::AudioChannelSet::stereo()) return false;
-    return true;
-}
-
-bool RebanadaProcessor::pairActive (int pair) const
-{
-    if (pair == 0) return true;
-    auto* bus = getBus (false, pair);
-    return bus != nullptr && bus->isEnabled() && bus->getNumberOfChannels() == 2;
+    const int outs = layouts.getMainOutputChannels();
+    return outs >= 1 && outs <= maxOutputs;
 }
 
 void RebanadaProcessor::prepareToPlay (double sampleRate, int)
@@ -104,14 +99,21 @@ void RebanadaProcessor::prepareToPlay (double sampleRate, int)
 Params RebanadaProcessor::readParams() const noexcept
 {
     Params p;
-    p.chance = refs.chance->load();     p.repeat = refs.repeat->load();
-    p.lfoRate = refs.lfoRate->load();   p.lfoDepth = refs.lfoDepth->load();   p.lfoDest = (int) refs.lfoDest->load();
-    p.attack = refs.attack->load();     p.decay = refs.decay->load();         p.sustain = refs.sustain->load();   p.release = refs.release->load();
-    p.cutoff = refs.cutoff->load();     p.reso = refs.reso->load();           p.filterType = (int) refs.filterType->load();
-    p.transpose = refs.transpose->load(); p.gain = refs.gain->load();
-    p.rate = refs.rate->load();         p.tempo = refs.tempo->load();
-    p.mode = (int) refs.mode->load();   p.switchAt = (int) refs.switchAt->load();
-    p.order = (int) refs.order->load(); p.play = refs.play->load() > 0.5f;
+    p.gain = refs.gain->load();
+    p.tempo = refs.tempo->load();
+    p.switchAt = (int) refs.switchAt->load();
+    p.play = refs.play->load() > 0.5f;
+    for (int l = 0; l < maxSlots; ++l)
+    {
+        const auto& L = refs.loops[(size_t) l];
+        auto& o = p.loops[(size_t) l];
+        o.chance = L.chance->load();     o.repeat = L.repeat->load();
+        o.lfoRate = L.lfoRate->load();   o.lfoDepth = L.lfoDepth->load();   o.lfoDest = (int) L.lfoDest->load();
+        o.attack = L.attack->load();     o.decay = L.decay->load();         o.sustain = L.sustain->load();   o.release = L.release->load();
+        o.cutoff = L.cutoff->load();     o.reso = L.reso->load();           o.filterType = (int) L.filterType->load();
+        o.transpose = L.transpose->load(); o.rate = L.rate->load();         o.level = L.level->load();
+        o.mode = (int) L.mode->load();   o.order = (int) L.order->load();
+    }
     return p;
 }
 
@@ -120,26 +122,7 @@ void RebanadaProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     juce::ScopedNoDenormals noDenormals;
     const int n = buffer.getNumSamples();
 
-    // the main pair first, then every enabled extra pair; disabled pairs fall back to the main
-    std::array<float*, maxOutputs> outs {};
-    std::array<int, maxPairs> route {};
-    int numOut = 0;
-    {
-        auto* mainBus = getBus (false, 0);
-        const int mainCh = mainBus != nullptr ? mainBus->getNumberOfChannels() : 0;
-        for (int c = 0; c < mainCh && c < 2 && c < buffer.getNumChannels(); ++c)
-            outs[(size_t) numOut++] = buffer.getWritePointer (getChannelIndexInProcessBlockBuffer (false, 0, c));
-        if (numOut == 2)
-            for (int p = 1; p < maxPairs; ++p)
-            {
-                if (! pairActive (p)) continue;
-                const int a = getChannelIndexInProcessBlockBuffer (false, p, 0), b = getChannelIndexInProcessBlockBuffer (false, p, 1);
-                if (a < 0 || b < 0 || a >= buffer.getNumChannels() || b >= buffer.getNumChannels()) continue;
-                route[(size_t) p] = numOut / 2;
-                outs[(size_t) numOut++] = buffer.getWritePointer (a);
-                outs[(size_t) numOut++] = buffer.getWritePointer (b);
-            }
-    }
+    const int numOut = juce::jmin (getTotalNumOutputChannels(), buffer.getNumChannels(), maxOutputs);
 
     keyboard.processNextMidiBuffer (midi, 0, n, true);
 
@@ -180,9 +163,8 @@ void RebanadaProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     const int req = requested.exchange (-1);
     if (req >= 0) engine.requestSlot (req);
 
-    buffer.clear();
-    engine.setRoute (route);
-    engine.process (outs.data(), numOut, n, readParams(), clock, events.data(), numEvents);
+    engine.process (buffer.getArrayOfWritePointers(), numOut, n, readParams(), clock, events.data(), numEvents);
+    for (int ch = numOut; ch < buffer.getNumChannels(); ++ch) buffer.clear (ch, 0, n);
     midi.clear();
 
     engineCurrent = engine.getCurrentSlot();
@@ -497,6 +479,7 @@ juce::ValueTree RebanadaProcessor::saveSlots() const
         const auto& s = engine.slots[(size_t) i];
         t.setProperty ("bars", s.bars, nullptr);
         t.setProperty ("slices", encodeSlices (s), nullptr);
+        t.setProperty ("fmt", 2, nullptr);
         slots.appendChild (t, nullptr);
     }
     return slots;
@@ -523,7 +506,7 @@ void RebanadaProcessor::restoreSlots (const juce::ValueTree& slots)
         meta[(size_t) i].sensitivity = t.getProperty ("sens", 50.0f);
         edit (i, [&] (Slot& s) {
             s.bars = juce::jlimit (1, 64, (int) t.getProperty ("bars", s.bars));
-            decodeSlices (s, t.getProperty ("slices").toString());
+            decodeSlices (s, t.getProperty ("slices").toString(), (int) t.getProperty ("fmt", 1));
         });
         selected[(size_t) i] = juce::jlimit (0, juce::jmax (0, slotInfo (i).numSlices - 1), (int) t.getProperty ("selected", 0));
     }
@@ -546,6 +529,22 @@ void RebanadaProcessor::setStateInformation (const void* data, int sizeInBytes)
 {
     auto xml = getXmlFromBinary (data, sizeInBytes);
     if (xml == nullptr || ! xml->hasTagName (apvts.state.getType())) return;
+
+    // Sessions from 0.1: settings that were shared by all the loops now belong to each one
+    for (const char* base : { "mode", "order", "lfoDest", "filterType", "chance", "repeat", "lfoRate", "lfoDepth", "attack",
+                              "decay", "sustain", "release", "cutoff", "reso", "transpose", "rate" })
+        if (auto* old = xml->getChildByAttribute ("id", base))
+        {
+            const auto value = old->getStringAttribute ("value");
+            for (int l = 0; l < maxSlots; ++l)
+                if (xml->getChildByAttribute ("id", loopId (l, base)) == nullptr)
+                {
+                    auto* e = xml->createNewChildElement ("PARAM");
+                    e->setAttribute ("id", loopId (l, base));
+                    e->setAttribute ("value", value);
+                }
+            xml->removeChildElement (old, true);
+        }
     auto state = juce::ValueTree::fromXml (*xml);
     auto slots = state.getChildWithName ("SLOTS").createCopy();
     state.removeChild (state.getChildWithName ("SLOTS"), nullptr);

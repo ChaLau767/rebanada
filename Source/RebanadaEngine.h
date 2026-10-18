@@ -5,7 +5,8 @@
 // Eight loop slots. Each slot holds a sample cut into slices. A sequencer plays the
 // slices of the current slot in time (synced to the host tempo, or in the loop's own
 // time), and MIDI notes play single slices. Every slice has its own pitch, level, pan,
-// decay, filter offset, direction and output pair.
+// decay, filter offset, direction and output channel (mono or stereo pair). Every loop
+// has its own envelope, filter, order, LFO and timing.
 
 #pragma once
 
@@ -22,8 +23,7 @@ namespace rebanada
 constexpr int maxSlots   = 8;
 constexpr int maxSlices  = 128;
 constexpr int maxVoices  = 48;
-constexpr int maxPairs   = 8;      // stereo output pairs: up to 16 channels
-constexpr int maxOutputs = maxPairs * 2;
+constexpr int maxOutputs = 64;     // output channels
 constexpr int slotBaseNote  = 12;  // C0 … G0 choose the loop (middle C = C4 = 60)
 constexpr int sliceBaseNote = 36;  // C2 plays slice 1
 constexpr float decayFull = 2000.0f;   // slice decay at its maximum: the slice plays to its end
@@ -45,7 +45,8 @@ struct SliceParams
     float filter = 0.0f;       // octaves added to the cutoff, -4 … +4
     bool reverse = false;
     bool mute    = false;
-    int  out     = 0;          // output pair, 0 = main
+    int  out     = 0;          // first output channel (0 = channel 1)
+    bool stereo  = true;       // a pair (out, out + 1) or a single mono channel
 };
 
 struct Slot
@@ -62,11 +63,10 @@ struct Slot
     int sliceEnd (int i) const noexcept { return i + 1 < numSlices ? starts[(size_t) i + 1] : length(); }
 };
 
-struct Params
+// Settings that each loop has for itself.
+struct LoopParams
 {
     int   mode = 0;          // 0 = sync to the host tempo, 1 = free (the loop's own time)
-    int   switchAt = 2;      // loop changes: 0 instant, 1 next beat, 2 next bar, 3 end of the loop
-    bool  play = true;       // loop playback on/off (MIDI notes always play)
     int   order = 0;         // 0 forward, 1 random, 2 weighted
     float chance = 50.0f;    // weighted: % of steps that play another slice
     float repeat = 0.0f;     // % of steps that repeat the previous slice
@@ -77,10 +77,18 @@ struct Params
     int   filterType = 0;    // 0 low-pass, 1 band-pass, 2 high-pass
     float cutoff = 20000.0f; // Hz
     float reso = 0.0f;       // %
-    float gain = 0.0f;       // dB
     float transpose = 0.0f;  // semitones
     float rate = 1.0f;       // free mode: speed of the loop's clock
+    float level = 0.0f;      // dB
+};
+
+struct Params
+{
+    int   switchAt = 2;      // loop changes: 0 instant, 1 next beat, 2 next bar, 3 end of the loop
+    bool  play = true;       // loop playback on/off (MIDI notes always play)
+    float gain = 0.0f;       // dB, all loops
     float tempo = 120.0f;    // internal tempo when there is no host transport
+    std::array<LoopParams, maxSlots> loops {};
 };
 
 // What the host says about time. When there is no host transport (standalone app),
@@ -173,9 +181,6 @@ public:
     }
 
     int getCurrentSlot() const noexcept { return currentSlot; }
-
-    // Which output pair (in the buffer given to process) each slice output goes to.
-    void setRoute (const std::array<int, maxPairs>& r) noexcept { route = r; }
     int getPendingSlot() const noexcept { return pendingSlot; }
 
     // Call (with the engine locked) before freeing a sample a voice might still read.
@@ -231,7 +236,8 @@ public:
             }
         }
         smoothedGain = target;
-        lfoPhase = std::fmod (lfoPhase + (double) p.lfoRate * n / sr, 1.0);
+        for (int l = 0; l < maxSlots; ++l)
+            lfoPhase[(size_t) l] = std::fmod (lfoPhase[(size_t) l] + (double) p.loops[(size_t) l].lfoRate * n / sr, 1.0);
         peakSinceSnapshot = std::max (peakSinceSnapshot, peak);
     }
 
@@ -286,7 +292,8 @@ private:
         float env = 0.0f, releaseStep = 0.0f;
         float decayMul = 1.0f, decayLevel = 1.0f;
         float gain = 1.0f, pan = 0.0f, filterOct = 0.0f, pitch = 0.0f;
-        int pair = 0;
+        int out = 0;
+        bool stereo = true;
         uint32_t age = 0;
         // per-voice filter (state-variable, trapezoidal)
         float s1L = 0, s2L = 0, s1R = 0, s2R = 0;
@@ -337,7 +344,7 @@ private:
         if (startedNow && pendingSlot >= 0) { currentSlot = pendingSlot; pendingSlot = -1; }
 
         const double qps = bpm / 60.0 / sr;                // quarter notes per sample
-        if (p.mode == 0)
+        if (p.loops[(size_t) currentSlot].mode == 0)
             scheduleSync (n, ppq0, qps, num, den, startedNow);
         else
             scheduleFree (n, startedNow);
@@ -475,7 +482,7 @@ private:
             const Slot& s = slots[(size_t) slot];
             if (s.empty()) break;
             const double len = s.length();
-            const double speed = std::max (0.01, (double) params.rate) * s.sample->sampleRate / sr;   // frames per host sample
+            const double speed = std::max (0.01, (double) params.loops[(size_t) slot].rate) * s.sample->sampleRate / sr;   // frames per host sample
 
             int nextStep = 0;
             double nextFrame = len;
@@ -555,9 +562,10 @@ private:
                 double startFrames = a.startFrames;
                 const int original = slice;
 
-                if (params.order == 1) slice = rng.below (s.numSlices);
-                else if (params.order == 2 && rng.next() * 100.0f < params.chance) slice = rng.below (s.numSlices);
-                if (lastPlayed >= 0 && lastPlayed < s.numSlices && params.repeat > 0.0f && rng.next() * 100.0f < params.repeat)
+                const LoopParams& lp = params.loops[(size_t) a.slot];
+                if (lp.order == 1) slice = rng.below (s.numSlices);
+                else if (lp.order == 2 && rng.next() * 100.0f < lp.chance) slice = rng.below (s.numSlices);
+                if (lastPlayed >= 0 && lastPlayed < s.numSlices && lp.repeat > 0.0f && rng.next() * 100.0f < lp.repeat)
                     slice = lastPlayed;
                 if (slice != original) startFrames = 0.0;
 
@@ -609,7 +617,7 @@ private:
     {
         if (v.stage == 3) return;
         v.stage = 3;
-        const float samples = std::max (1.0f, params.release * 0.001f * (float) sr);
+        const float samples = std::max (1.0f, params.loops[(size_t) v.slot].release * 0.001f * (float) sr);
         v.releaseStep = std::max (v.env, 1.0e-4f) / samples;
     }
 
@@ -648,7 +656,8 @@ private:
         v.gain = detail::dbToGain (sp.level) * detail::dbToGain (-24.0f * (1.0f - velocity));
         v.pan = sp.pan;
         v.filterOct = sp.filter;
-        v.pair = std::clamp (sp.out, 0, maxPairs - 1);
+        v.out = std::clamp (sp.out, 0, maxOutputs - 1);
+        v.stereo = sp.stereo;
         v.stage = 0;
         v.env = 0.0f;
         v.decayLevel = 1.0f;
@@ -664,7 +673,7 @@ private:
     // Pitch, filter and pan, refreshed every few samples.
     void updateControl (Voice& v, float lfo) noexcept
     {
-        const Params& p = params;
+        const LoopParams& p = params.loops[(size_t) v.slot];
         const float depth = std::clamp (p.lfoDepth * 0.01f, 0.0f, 1.0f);
         float pitch = v.pitch + p.transpose, oct = v.filterOct, pan = v.pan, amp = 1.0f;
         switch (p.lfoDest)
@@ -677,6 +686,7 @@ private:
         v.inc = (float) (v.baseInc * std::pow (2.0, pitch / 12.0));
 
         pan = std::clamp (pan, -1.0f, 1.0f);
+        amp *= detail::dbToGain (p.level);
         v.gL = (pan <= 0.0f ? 1.0f : 1.0f - pan) * v.gain * amp;
         v.gR = (pan >= 0.0f ? 1.0f : 1.0f + pan) * v.gain * amp;
 
@@ -695,33 +705,41 @@ private:
     void render (float* const* out, int numOut, int from, int to)
     {
         if (to <= from) return;
-        const Params& p = params;
-        const float attackSamples  = std::max (1.0f, std::max (1.0f, p.attack) * 0.001f * (float) sr);
-        const float decaySamples   = std::max (1.0f, p.decay * 0.001f * (float) sr);
-        const float sustain = std::clamp (p.sustain * 0.01f, 0.0f, 1.0f);
-        const int type = p.filterType;
 
         for (int vi = 0; vi < maxVoices; ++vi)
         {
             Voice& v = voices[(size_t) vi];
             if (! v.active) continue;
+            const LoopParams& p = params.loops[(size_t) v.slot];
+            const float attackSamples  = std::max (1.0f, std::max (1.0f, p.attack) * 0.001f * (float) sr);
+            const float decaySamples   = std::max (1.0f, p.decay * 0.001f * (float) sr);
+            const float sustain = std::clamp (p.sustain * 0.01f, 0.0f, 1.0f);
+            const int type = p.filterType;
             const Sample* smp = v.smp;
             if (smp == nullptr || smp->length() < 2) { v.active = false; continue; }
             const float* L = smp->left.data();
             const float* R = smp->right.data();
             const int len = smp->length();
 
-            int pair = route[(size_t) v.pair];
-            if (pair * 2 + 1 >= numOut) pair = 0;
-            float* outL = out[std::min (pair * 2, numOut - 1)];
-            float* outR = numOut > 1 ? out[std::min (pair * 2 + 1, numOut - 1)] : nullptr;
+            // channels: a pair or a single channel; outside the host's channels, back to 1-2
+            float* outL = nullptr;
+            float* outR = nullptr;
+            if (v.stereo)
+            {
+                const int c = v.out + 1 < numOut ? v.out : 0;
+                outL = out[c];
+                outR = numOut > 1 ? out[c + 1] : nullptr;
+            }
+            else if (v.out < numOut) outL = out[v.out];
+            else { outL = out[0]; outR = numOut > 1 ? out[1] : nullptr; }
+            const bool monoSum = outR == nullptr;
             const float fadeFrames = 48.0f;
 
             for (int i = from; i < to; ++i)
             {
                 if ((i & 31) == 0 || i == from)
                 {
-                    const double ph = lfoPhase + (double) p.lfoRate * i / sr;
+                    const double ph = lfoPhase[(size_t) v.slot] + (double) p.lfoRate * i / sr;
                     updateControl (v, (float) std::sin (ph * 6.283185307179586));
                 }
 
@@ -768,7 +786,7 @@ private:
                 }
 
                 const float a = v.env * v.decayLevel * std::max (0.0f, edge);
-                if (outR != nullptr)
+                if (! monoSum)
                 {
                     outL[i] += l * a * v.gL;
                     outR[i] += r * a * v.gR;
@@ -789,7 +807,6 @@ private:
     double sr = 44100.0;
     Params params;
     std::array<Voice, maxVoices> voices {};
-    std::array<int, maxPairs> route { 0, 1, 2, 3, 4, 5, 6, 7 };
     uint32_t voiceCounter = 0;
     std::array<Action, 1024> actions {};
     int numActions = 0;
@@ -801,7 +818,7 @@ private:
     double shownBpm = 120.0;
     bool shownHostTempo = false;
     int lastPlayed = -1, loopVoice = -1;
-    double lfoPhase = 0.0;
+    std::array<double, maxSlots> lfoPhase {};
     float smoothedGain = -1.0f, peakSinceSnapshot = 0.0f;
     detail::Random rng;
 };

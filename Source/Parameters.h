@@ -58,8 +58,9 @@ inline const std::vector<FloatSpec>& floatSpecs()
         { "release",   "Release",    "Extinción",  5.0f,   5000.0f,  40.0f,    "ms",  0, S::logarithmic, false, "Fade after the slice is released", "Desvanecimiento al soltar la rebanada" },
         { "cutoff",    "Cutoff",     "Corte",      20.0f,  20000.0f, 20000.0f, "Hz",  0, S::logarithmic, false, "Filter frequency for every slice (each slice can shift it)", "Frecuencia del filtro para todas las rebanadas (cada una puede correrla)" },
         { "reso",      "Reso",       "Reson.",     0.0f,   100.0f,   0.0f,     "%",   0, S::linear,      false, "Filter resonance", "Resonancia del filtro" },
-        { "transpose", "Transpose",  "Transp.",    -24.0f, 24.0f,    0.0f,     "st",  0, S::linear,      true,  "Transposes every slice", "Transpone todas las rebanadas", 1.0f },
-        { "gain",      "Output",     "Salida",     -36.0f, 12.0f,    0.0f,     "dB",  1, S::linear,      true,  "", "" },
+        { "transpose", "Transpose",  "Transp.",    -24.0f, 24.0f,    0.0f,     "st",  0, S::linear,      true,  "Transposes every slice of this loop", "Transpone todas las rebanadas de este loop", 1.0f },
+        { "level",     "Level",      "Nivel",      -36.0f, 12.0f,    0.0f,     "dB",  1, S::linear,      true,  "Level of this loop", "Nivel de este loop" },
+        { "gain",      "Output",     "Salida",     -36.0f, 12.0f,    0.0f,     "dB",  1, S::linear,      true,  "Output level of all the loops", "Nivel de salida de todos los loops" },
         { "rate",      "Rate",       "Velocidad",  0.25f,  4.0f,     1.0f,     "x",   2, S::logarithmic, false, "Free mode: speed of the loop's own clock (the slices keep their pitch)", "Modo libre: velocidad del reloj del loop (las rebanadas conservan su altura)" },
         { "tempo",     "Tempo",      "Tempo",      40.0f,  240.0f,   120.0f,   "BPM", 1, S::linear,      false, "Tempo used when there is no host transport (standalone app)", "Tempo cuando no hay transporte del anfitrión (aplicación independiente)" },
     };
@@ -87,7 +88,12 @@ inline const FloatSpec& findSpec (const std::vector<FloatSpec>& list, const juce
     jassertfalse;
     return list.front();
 }
-inline const FloatSpec& spec (const juce::String& id)      { return findSpec (floatSpecs(), id); }
+// Host parameters of each loop are called "L1_cutoff" … "L8_cutoff".
+inline juce::String loopId (int slot, const char* base) { return "L" + juce::String (slot + 1) + "_" + base; }
+inline juce::String baseId (const juce::String& id) { return id.startsWith ("L") && id.containsChar ('_') ? id.fromFirstOccurrenceOf ("_", false, false) : id; }
+inline bool isGlobal (const juce::String& id) { return id == "gain" || id == "tempo" || id == "play" || id == "switchAt"; }
+
+inline const FloatSpec& spec (const juce::String& id)      { return findSpec (floatSpecs(), baseId (id)); }
 inline const FloatSpec& sliceSpec (const juce::String& id) { return findSpec (sliceSpecs(), id); }
 
 inline const juce::StringArray& modeChoices()    { static const juce::StringArray c { "Sync", "Free" }; return c; }
@@ -153,24 +159,38 @@ inline juce::NormalisableRange<float> rangeFor (const FloatSpec& s)
 inline juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
 {
     juce::AudioProcessorValueTreeState::ParameterLayout layout;
-    const int v1 = 1;
+    const int v2 = 2;   // version 2: every loop has its own parameters (Rebanada 0.2)
 
-    for (const auto& s : floatSpecs())
-    {
+    auto floatParam = [] (const juce::String& id, const juce::String& name, const FloatSpec& s, int version) {
         const auto sp = s;
-        layout.add (std::make_unique<juce::AudioParameterFloat> (
-            juce::ParameterID { s.id, v1 }, u8 (s.en), rangeFor (s), s.def,
+        return std::make_unique<juce::AudioParameterFloat> (
+            juce::ParameterID { id, version }, name, rangeFor (s), s.def,
             juce::AudioParameterFloatAttributes()
                 .withLabel (s.unit)
                 .withStringFromValueFunction ([sp] (float v, int) { return formatValue (sp, v); })
-                .withValueFromStringFunction ([sp] (const juce::String& t) { return parseValue (sp, t); })));
+                .withValueFromStringFunction ([sp] (const juce::String& t) { return parseValue (sp, t); }));
+    };
+
+    layout.add (std::make_unique<juce::AudioParameterBool>   (juce::ParameterID { "play", 1 },     "Loop play", true));
+    layout.add (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { "switchAt", 1 }, "Switch at", switchChoices(), 2));
+    layout.add (floatParam ("tempo", "Tempo", spec ("tempo"), 1));
+    layout.add (floatParam ("gain", "Output", spec ("gain"), 1));
+
+    for (int l = 0; l < maxSlots; ++l)
+    {
+        const juce::String prefix = "L" + juce::String (l + 1) + " ";
+        auto group = std::make_unique<juce::AudioProcessorParameterGroup> ("loop" + juce::String (l + 1), "Loop " + juce::String (l + 1), "|");
+        group->addChild (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { loopId (l, "mode"), v2 }, prefix + "Mode", modeChoices(), 0));
+        group->addChild (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { loopId (l, "order"), v2 }, prefix + "Order", orderChoices(), 0));
+        group->addChild (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { loopId (l, "filterType"), v2 }, prefix + "Filter type", filterChoices(), 0));
+        group->addChild (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { loopId (l, "lfoDest"), v2 }, prefix + "LFO target", lfoDestChoices(), 0));
+        for (const auto& s : floatSpecs())
+        {
+            if (isGlobal (s.id)) continue;
+            group->addChild (floatParam (loopId (l, s.id), prefix + u8 (s.en), s, v2));
+        }
+        layout.add (std::move (group));
     }
-    layout.add (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { "mode", v1 },       "Mode",        modeChoices(), 0));
-    layout.add (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { "switchAt", v1 },   "Switch at",   switchChoices(), 2));
-    layout.add (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { "order", v1 },      "Order",       orderChoices(), 0));
-    layout.add (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { "lfoDest", v1 },    "LFO target",  lfoDestChoices(), 0));
-    layout.add (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { "filterType", v1 }, "Filter type", filterChoices(), 0));
-    layout.add (std::make_unique<juce::AudioParameterBool>   (juce::ParameterID { "play", v1 },       "Loop play",   true));
     return layout;
 }
 
@@ -231,11 +251,19 @@ inline juce::String tr (Lang lang, const char* key)
         { "open",        "Open",                          "Abierto" },
         { "full",        "Full",                          "Entera" },
         { "dblclick",    "Double-click: default value",   "Doble clic: valor inicial" },
-        { "waveTip",     "Click: choose a slice · Drag a marker to move it · Double-click: new marker · Right-click a marker: delete", "Clic: elegir rebanada · Arrastrá un marcador para moverlo · Doble clic: marcador nuevo · Clic derecho en un marcador: borrarlo" },
+        { "waveTip",     "Click: choose a slice · Drag a marker to move it · Double-click: new marker · Right-click a marker: delete · Wheel or pinch: zoom · Shift+wheel or the bar below: move", "Clic: elegir rebanada · Arrastrá un marcador para moverlo · Doble clic: marcador nuevo · Clic derecho en un marcador: borrarlo · Rueda o pellizco: zoom · Mayúsculas+rueda o la barra de abajo: desplazarse" },
         { "slotTip",     "Click: choose the loop (it changes at the point set in «Switch at») · Right-click: load or clear", "Clic: elegir el loop (cambia en el punto elegido en «Cambio») · Clic derecho: cargar o vaciar" },
         { "keysTip",     "Click a key to hear its slice", "Hacé clic en una tecla para escuchar su rebanada" },
         { "playTip",     "Plays the loop while the host plays (always, in the standalone app)", "Toca el loop mientras el anfitrión reproduce (siempre, en la aplicación independiente)" },
         { "outputs",     "outputs",                       "salidas" },
+        { "outputOne",   "output",                        "salida" },
+        { "outputLevel", "out",                           "salida" },
+        { "channelsShort", "ch",                          "can." },
+        { "outputTip",   "Output level of all the loops. Drag up or down. Double-click: 0 dB", "Nivel de salida de todos los loops. Arrastrá hacia arriba o abajo. Doble clic: 0 dB" },
+        { "monoShort",   "M",                             "M" },
+        { "stereoShort", "ST",                            "EST" },
+        { "stereoTip",   "M: the slice goes to one channel. ST: to a pair of channels, with its pan", "M: la rebanada sale por un canal. EST: por un par de canales, con su paneo" },
+        { "outTip",      "Output channel. Give the track more channels in your DAW (up to 64) to use them", "Canal de salida. Para usar más, dale más canales a la pista en tu DAW (hasta 64)" },
         { "detectTip",   "Higher: more and softer attacks become slices", "Más alto: más ataques, y más suaves, se vuelven rebanadas" },
         { "barsTip",     "Loop length in bars, for sync mode", "Duración del loop en compases, para el modo sync" },
         { "openFile",    "Choose an audio file",          "Elegí un archivo de audio" },

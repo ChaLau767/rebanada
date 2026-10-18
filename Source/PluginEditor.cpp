@@ -258,10 +258,12 @@ Knob::Knob (const FloatSpec& s, bool bipolar) : spec (s)
     addAndMakeVisible (slider);
 }
 
-void Knob::attach (juce::AudioProcessorValueTreeState& apvts)
+void Knob::attach (juce::AudioProcessorValueTreeState& apvts, const juce::String& paramId)
 {
-    attachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (apvts, spec.id, slider);
+    attachment.reset();
+    attachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (apvts, paramId, slider);
     slider.setDoubleClickReturnValue (true, spec.def);
+    repaint();
 }
 
 void Knob::setLanguage (Lang l)
@@ -419,9 +421,15 @@ void SlotStrip::paint (juce::Graphics& g)
 //==============================================================================
 TempoDisplay::TempoDisplay (RebanadaProcessor& p) : processor (p) {}
 
+bool TempoDisplay::freeMode() const
+{
+    return processor.apvts.getRawParameterValue (loopId (processor.editSlot(), "mode"))->load() > 0.5f;
+}
+
 juce::RangedAudioParameter* TempoDisplay::target() const
 {
-    if (processor.apvts.getRawParameterValue ("mode")->load() > 0.5f) return processor.apvts.getParameter ("rate");
+    if (output) return processor.apvts.getParameter ("gain");
+    if (freeMode()) return processor.apvts.getParameter (loopId (processor.editSlot(), "rate"));
     if (! tele.hostTempo) return processor.apvts.getParameter ("tempo");
     return nullptr;
 }
@@ -429,8 +437,11 @@ juce::RangedAudioParameter* TempoDisplay::target() const
 void TempoDisplay::update (const Telemetry& t, Lang l)
 {
     tele = t;
-    if (lang != l) { lang = l; setTooltip (tr (lang, "tempoTip")); }
-    if (getTooltip().isEmpty()) setTooltip (tr (lang, "tempoTip"));
+    if (lang != l || getTooltip().isEmpty())
+    {
+        lang = l;
+        setTooltip (output ? tr (lang, "outputTip") : tr (lang, "tempoTip"));
+    }
     setMouseCursor (target() != nullptr ? juce::MouseCursor::UpDownResizeCursor : juce::MouseCursor::NormalCursor);
     repaint();
 }
@@ -469,11 +480,15 @@ void TempoDisplay::paint (juce::Graphics& g)
     g.setColour (colours::screenEdge);
     g.drawRoundedRectangle (r, 8.0f, 1.0f);
 
-    const bool free = processor.apvts.getRawParameterValue ("mode")->load() > 0.5f;
     juce::String main, sub;
-    if (free)
+    if (output)
     {
-        main = localNumber (juce::String (processor.apvts.getRawParameterValue ("rate")->load(), 2), lang) + u8 ("×");
+        main = localValue (formatValue (spec ("gain"), processor.apvts.getRawParameterValue ("gain")->load()), lang);
+        sub = tr (lang, "outputLevel") + u8 (" · ") + juce::String (processor.numOutputs()) + " " + tr (lang, "channelsShort");
+    }
+    else if (freeMode())
+    {
+        main = localNumber (juce::String (processor.apvts.getRawParameterValue (loopId (processor.editSlot(), "rate"))->load(), 2), lang) + u8 ("×");
         sub = tr (lang, "rateFree");
     }
     else if (tele.hostTempo)
@@ -486,15 +501,13 @@ void TempoDisplay::paint (juce::Graphics& g)
         main = localNumber (juce::String (processor.apvts.getRawParameterValue ("tempo")->load(), 1), lang);
         sub = tr (lang, "bpmOwn");
     }
-    auto inner = r.reduced (12.0f, 0.0f);
+    auto inner = r.reduced (10.0f, 4.0f);
     g.setColour (colours::accent);
-    g.setFont (mono (19.0f));
-    const float mw = juce::GlyphArrangement::getStringWidth (mono (19.0f), main);
-    g.drawText (main, inner.removeFromLeft (mw + 2.0f), juce::Justification::centredLeft);
-    inner.removeFromLeft (8.0f);
+    g.setFont (mono (17.0f));
+    g.drawText (main, inner.removeFromTop (inner.getHeight() * 0.58f), juce::Justification::bottomLeft);
     g.setColour (colours::sub);
-    g.setFont (mono (10.5f));
-    g.drawFittedText (sub, inner.toNearestInt(), juce::Justification::centredLeft, 2, 0.8f);
+    g.setFont (mono (9.5f));
+    g.drawFittedText (sub, inner.toNearestInt(), juce::Justification::topLeft, 1, 0.7f);
 }
 
 //==============================================================================
@@ -502,21 +515,63 @@ WaveView::WaveView (RebanadaProcessor& p) : processor (p) {}
 
 juce::Rectangle<float> WaveView::waveArea() const
 {
-    return getLocalBounds().toFloat().withTrimmedTop ((float) labelHeight + 2.0f);
+    return getLocalBounds().toFloat().withTrimmedTop ((float) labelHeight + 2.0f).withTrimmedBottom ((float) barHeight);
 }
+
+juce::Rectangle<float> WaveView::scrollArea() const
+{
+    return getLocalBounds().toFloat().removeFromBottom ((float) barHeight - 2.0f).withTrimmedTop (2.0f);
+}
+
+double WaveView::totalFrames() const { return info.sample ? (double) juce::jmax (1, info.sample->length()) : 1.0; }
+double WaveView::visStart() const    { return viewLen > 0.0 ? viewStart : 0.0; }
+double WaveView::visLen() const      { return viewLen > 0.0 ? viewLen : totalFrames(); }
 
 float WaveView::xFor (int frame) const
 {
     const auto a = waveArea();
-    const int len = info.sample ? info.sample->length() : 1;
-    return a.getX() + a.getWidth() * (float) frame / (float) juce::jmax (1, len);
+    return a.getX() + a.getWidth() * (float) ((frame - visStart()) / visLen());
 }
 
 int WaveView::frameFor (float x) const
 {
     const auto a = waveArea();
-    const int len = info.sample ? info.sample->length() : 1;
-    return juce::jlimit (0, len, (int) std::lround ((x - a.getX()) / a.getWidth() * len));
+    return juce::jlimit (0, (int) totalFrames(), (int) std::llround (visStart() + (x - a.getX()) / a.getWidth() * visLen()));
+}
+
+// Zoom keeping the frame under the mouse in place. factor < 1 zooms in.
+void WaveView::zoomAround (double frame, double factor)
+{
+    const double total = totalFrames();
+    const double minLen = juce::jmax (64.0, (double) waveArea().getWidth());
+    const double len = juce::jlimit (juce::jmin (minLen, total), total, visLen() * factor);
+    if (len >= total - 0.5) { viewLen = 0.0; viewStart = 0.0; repaint(); return; }
+    const double start = frame - (frame - visStart()) * len / visLen();
+    viewLen = len;
+    viewStart = juce::jlimit (0.0, total - len, start);
+    repaint();
+}
+
+void WaveView::panBy (double frames)
+{
+    if (viewLen <= 0.0) return;
+    viewStart = juce::jlimit (0.0, totalFrames() - viewLen, viewStart + frames);
+    repaint();
+}
+
+void WaveView::mouseWheelMove (const juce::MouseEvent& e, const juce::MouseWheelDetails& w)
+{
+    if (! info.loaded()) return;
+    const bool horizontal = std::abs (w.deltaX) > std::abs (w.deltaY) || e.mods.isShiftDown();
+    if (horizontal)
+        panBy (-(std::abs (w.deltaX) > std::abs (w.deltaY) ? w.deltaX : w.deltaY) * visLen() * 0.6);
+    else
+        zoomAround (frameFor (e.position.x), std::pow (2.0, -w.deltaY * 3.0));
+}
+
+void WaveView::mouseMagnify (const juce::MouseEvent& e, float scale)
+{
+    if (info.loaded() && scale > 0.0f) zoomAround (frameFor (e.position.x), 1.0 / scale);
 }
 
 int WaveView::sliceAt (float x) const
@@ -553,6 +608,7 @@ int WaveView::markerAt (juce::Point<float> p) const
 
 void WaveView::setInfo (int s, const RebanadaProcessor::SlotInfo& i)
 {
+    if (s != slot || i.sample != info.sample) { viewStart = 0.0; viewLen = 0.0; }
     slot = s;
     info = i;
     setTooltip (info.loaded() ? tr (lang, "waveTip") : juce::String());
@@ -561,25 +617,34 @@ void WaveView::setInfo (int s, const RebanadaProcessor::SlotInfo& i)
 
 void WaveView::computePeaks()
 {
-    peaksFor = info.sample.get();
     peaks.clear();
-    if (! info.loaded()) return;
-    const int columns = juce::jmax (1, (int) (waveArea().getWidth() / 3.0f));
+    if (! info.loaded()) { peaksFor = nullptr; return; }
     const auto& L = info.sample->left;
     const auto& R = info.sample->right;
     const int len = info.sample->length();
+
+    // the loudest point of the whole sample: zooming does not change the scale
+    if (peaksFor != info.sample.get())
+    {
+        loudest = 1.0e-6f;
+        const int step = juce::jmax (1, len / 200000);
+        for (int i = 0; i < len; i += step) loudest = juce::jmax (loudest, std::abs (L[(size_t) i]), std::abs (R[(size_t) i]));
+        peaksFor = info.sample.get();
+    }
+    peaksStart = visStart();
+    peaksLen = visLen();
+
+    const int columns = juce::jmax (1, (int) (waveArea().getWidth() / 3.0f));
     peaks.assign ((size_t) columns, 0.0f);
-    float loudest = 1.0e-6f;
     for (int c = 0; c < columns; ++c)
     {
-        const int a = (int) ((long long) len * c / columns), b = juce::jmax (a + 1, (int) ((long long) len * (c + 1) / columns));
+        const int a = juce::jlimit (0, len - 1, (int) (peaksStart + peaksLen * c / columns));
+        const int b = juce::jlimit (a + 1, len, (int) (peaksStart + peaksLen * (c + 1) / columns));
         const int step = juce::jmax (1, (b - a) / 400);
         float m = 0.0f;
         for (int i = a; i < b; i += step) m = juce::jmax (m, std::abs (L[(size_t) i]), std::abs (R[(size_t) i]));
-        peaks[(size_t) c] = m;
-        loudest = juce::jmax (loudest, m);
+        peaks[(size_t) c] = juce::jmin (1.0f, m / loudest);
     }
-    for (auto& v : peaks) v = juce::jmin (1.0f, v / loudest);
 }
 
 void WaveView::update (const Telemetry& t, Lang l)
@@ -609,17 +674,23 @@ void WaveView::paint (juce::Graphics& g)
         return;
     }
 
-    if (info.sample.get() != peaksFor || (int) peaks.size() != juce::jmax (1, (int) (waveArea().getWidth() / 3.0f))) computePeaks();
+    if (info.sample.get() != peaksFor || std::abs (peaksStart - visStart()) > 0.5 || std::abs (peaksLen - visLen()) > 0.5
+        || (int) peaks.size() != juce::jmax (1, (int) (waveArea().getWidth() / 3.0f))) computePeaks();
     const int sel = juce::jlimit (0, juce::jmax (0, info.numSlices - 1), processor.selectedSlice (slot));
     const int n = (int) info.starts.size();
     const auto& params = info.params;
     const bool here = tele.currentSlot == slot;
 
+    const float left = a.getX(), right = a.getRight();
+    auto visible = [&] (float x) { return x >= left - 0.5f && x <= right + 0.5f; };
+
     // selected slice region
-    const float selX0 = xFor (info.starts[(size_t) sel]);
-    const float selX1 = sel + 1 < n ? xFor (info.starts[(size_t) sel + 1]) : a.getRight();
-    g.setColour (colours::accent.withAlpha (0.10f));
-    g.fillRect (juce::Rectangle<float> (selX0, a.getY(), selX1 - selX0, a.getHeight()));
+    {
+        const float x0 = juce::jlimit (left, right, xFor (info.starts[(size_t) sel]));
+        const float x1 = juce::jlimit (left, right, sel + 1 < n ? xFor (info.starts[(size_t) sel + 1]) : xFor (info.sample->length()));
+        g.setColour (colours::accent.withAlpha (0.10f));
+        g.fillRect (juce::Rectangle<float> (x0, a.getY(), juce::jmax (0.0f, x1 - x0), a.getHeight()));
+    }
 
     g.setColour (colours::screenEdge);
     g.fillRect (a.getX(), a.getCentreY(), a.getWidth(), 1.0f);
@@ -627,10 +698,9 @@ void WaveView::paint (juce::Graphics& g)
     // waveform as columns
     const int columns = (int) peaks.size();
     int k = 0;
-    const int len = info.sample->length();
     for (int c = 0; c < columns; ++c)
     {
-        const int frame = (int) ((long long) len * c / columns);
+        const int frame = (int) (peaksStart + peaksLen * c / columns);
         while (k + 1 < n && info.starts[(size_t) k + 1] <= frame) ++k;
         const float x = a.getX() + c * 3.0f;
         const float h = juce::jmax (2.0f, peaks[(size_t) c] * a.getHeight() * 0.92f);
@@ -648,6 +718,7 @@ void WaveView::paint (juce::Graphics& g)
     for (int i = 0; i < n; ++i)
     {
         const float x = xFor (info.starts[(size_t) i]);
+        if (! visible (x)) continue;
         const bool on = i == sel;
         const bool hot = i == hoverMarker || i == dragMarker;
         if (i > 0)
@@ -682,18 +753,30 @@ void WaveView::paint (juce::Graphics& g)
     // where the sound is
     if (here)
     {
+        const float total = (float) totalFrames();
         g.setColour (colours::accent.withAlpha (0.9f));
         for (int i = 0; i < tele.numVoicePos; ++i)
         {
-            const float x = a.getX() + a.getWidth() * tele.voicePos[i];
-            g.fillRect (x, a.getY() + 6.0f, 1.0f, a.getHeight() - 12.0f);
+            const float x = xFor ((int) (tele.voicePos[i] * total));
+            if (visible (x)) g.fillRect (x, a.getY() + 6.0f, 1.0f, a.getHeight() - 12.0f);
         }
         if (tele.running && tele.loopFrac >= 0.0f)
         {
-            const float x = a.getX() + a.getWidth() * tele.loopFrac;
+            const float x = xFor ((int) (tele.loopFrac * total));
             g.setColour (colours::text.withAlpha (0.85f));
-            g.fillRect (x - 1.0f, a.getY() - 4.0f, 2.0f, a.getHeight() + 8.0f);
+            if (visible (x)) g.fillRect (x - 1.0f, a.getY() - 4.0f, 2.0f, a.getHeight() + 8.0f);
         }
+    }
+
+    // overview bar: where the view is inside the whole sample
+    {
+        const auto bar = scrollArea();
+        g.setColour (colours::screenEdge);
+        g.fillRoundedRectangle (bar, bar.getHeight() * 0.5f);
+        const float t0 = (float) (visStart() / totalFrames()), t1 = (float) ((visStart() + visLen()) / totalFrames());
+        auto thumb = juce::Rectangle<float> (bar.getX() + bar.getWidth() * t0, bar.getY(), juce::jmax (8.0f, bar.getWidth() * (t1 - t0)), bar.getHeight());
+        g.setColour (viewLen > 0.0 ? colours::sub : colours::line);
+        g.fillRoundedRectangle (thumb, bar.getHeight() * 0.5f);
     }
 }
 
@@ -709,9 +792,22 @@ void WaveView::mouseMove (const juce::MouseEvent& e)
 void WaveView::mouseDown (const juce::MouseEvent& e)
 {
     dragMoved = false;
+    scrolling = false;
     if (! info.loaded())
     {
         if (onLoadRequest) onLoadRequest();
+        return;
+    }
+    if (e.position.y >= scrollArea().getY() - 2.0f)
+    {
+        // the overview bar: grab the view, or jump to where it was clicked
+        const auto bar = scrollArea();
+        const double frame = (e.position.x - bar.getX()) / bar.getWidth() * totalFrames();
+        if (viewLen > 0.0 && (frame < visStart() || frame > visStart() + visLen()))
+            viewStart = juce::jlimit (0.0, totalFrames() - viewLen, frame - viewLen * 0.5);
+        scrolling = true;
+        scrollGrab = frame - visStart();
+        repaint();
         return;
     }
     const int m = markerAt (e.position);
@@ -739,6 +835,15 @@ void WaveView::mouseDown (const juce::MouseEvent& e)
 
 void WaveView::mouseDrag (const juce::MouseEvent& e)
 {
+    if (scrolling)
+    {
+        if (viewLen <= 0.0) return;
+        const auto bar = scrollArea();
+        const double frame = (e.position.x - bar.getX()) / bar.getWidth() * totalFrames();
+        viewStart = juce::jlimit (0.0, totalFrames() - viewLen, frame - scrollGrab);
+        repaint();
+        return;
+    }
     if (dragMarker <= 0 || e.getDistanceFromDragStart() < 2) return;
     dragMoved = true;
     processor.moveMarker (slot, dragMarker, frameFor (e.position.x));
@@ -754,6 +859,7 @@ void WaveView::mouseUp (const juce::MouseEvent&)
 
 void WaveView::mouseDoubleClick (const juce::MouseEvent& e)
 {
+    if (e.position.y >= scrollArea().getY() - 2.0f) { viewStart = 0.0; viewLen = 0.0; repaint(); return; }
     if (! info.loaded() || e.position.y < (float) labelHeight || markerAt (e.position) > 0) return;
     const int idx = processor.addMarker (slot, frameFor (e.position.x));
     if (idx >= 0) processor.setSelectedSlice (slot, idx);
@@ -903,8 +1009,8 @@ void KeyStrip::paint (juce::Graphics& g)
 //==============================================================================
 namespace
 {
-    int choiceIndex (RebanadaProcessor& p, const char* id) { return juce::roundToInt (p.apvts.getRawParameterValue (id)->load()); }
-    void setChoice (RebanadaProcessor& p, const char* id, int index)
+    int choiceIndex (RebanadaProcessor& p, const juce::String& id) { return juce::roundToInt (p.apvts.getRawParameterValue (id)->load()); }
+    void setChoice (RebanadaProcessor& p, const juce::String& id, int index)
     {
         if (auto* param = p.apvts.getParameter (id))
         {
@@ -918,12 +1024,18 @@ namespace
 Content::Content (RebanadaProcessor& p)
     : processor (p),
       slots (p),
-      modeSwitch ({ "sync", "free" }, false, [&p] { return choiceIndex (p, "mode"); }, [&p] (int i) { setChoice (p, "mode", i); }),
+      modeSwitch ({ "sync", "free" }, false, [&p] { return choiceIndex (p, loopId (p.editSlot(), "mode")); },
+                  [&p] (int i) { setChoice (p, loopId (p.editSlot(), "mode"), i); }),
       tempo (p),
+      outputDisplay (p),
       wave (p),
       midiDragger (p),
-      filterSwitch ({ "LP", "BP", "HP" }, true, [&p] { return choiceIndex (p, "filterType"); }, [&p] (int i) { setChoice (p, "filterType", i); }),
-      orderSwitch ({ "forward", "random", "weighted" }, false, [&p] { return choiceIndex (p, "order"); }, [&p] (int i) { setChoice (p, "order", i); }),
+      filterSwitch ({ "LP", "BP", "HP" }, true, [&p] { return choiceIndex (p, loopId (p.editSlot(), "filterType")); },
+                    [&p] (int i) { setChoice (p, loopId (p.editSlot(), "filterType"), i); }),
+      orderSwitch ({ "forward", "random", "weighted" }, false, [&p] { return choiceIndex (p, loopId (p.editSlot(), "order")); },
+                   [&p] (int i) { setChoice (p, loopId (p.editSlot(), "order"), i); }),
+      stereoSwitch ({ "monoShort", "stereoShort" }, false, [this] { return shownStereo ? 1 : 0; },
+                    [this] (int i) { const bool st = i == 1; editSlice ([st] (SliceParams& sp) { sp.stereo = st; if (st) sp.out &= ~1; }); refreshSlice(); }),
       keys (p)
 {
     setLookAndFeel (&lnf);
@@ -952,17 +1064,22 @@ Content::Content (RebanadaProcessor& p)
     modeSwitch.capsLabels = true;
     addAndMakeVisible (modeSwitch);
     addAndMakeVisible (tempo);
+    outputDisplay.output = true;
+    addAndMakeVisible (outputDisplay);
 
     for (auto* box : { &switchBox, &lfoBox, &outBox }) addAndMakeVisible (box);
     switchBox.addItemList ({ "Instant", "1 beat", "1 bar", "Loop end" }, 1);
     lfoBox.addItemList ({ "Cutoff", "Pitch", "Pan", "Level" }, 1);
     switchAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment> (processor.apvts, "switchAt", switchBox);
-    lfoAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment> (processor.apvts, "lfoDest", lfoBox);
-    for (int i = 0; i < maxPairs; ++i) outBox.addItem (juce::String (i), i + 1);
     outBox.onChange = [this] {
-        const int pair = outBox.getSelectedId() - 1;
-        if (pair >= 0) editSlice ([pair] (SliceParams& sp) { sp.out = pair; });
+        const int id = outBox.getSelectedId();
+        if (id <= 0) return;
+        const int channel = shownStereo ? (id - 1) * 2 : id - 1;
+        editSlice ([channel] (SliceParams& sp) { sp.out = channel; });
     };
+    stereoSwitch.setPlainLabels (false);
+    stereoSwitch.fontSize = 11.5f;
+    addAndMakeVisible (stereoSwitch);
 
     addAndMakeVisible (wave);
     wave.onSelectionChange = [this] { refreshSlice(); };
@@ -1031,17 +1148,17 @@ Content::Content (RebanadaProcessor& p)
         };
         addAndMakeVisible (k);
     }
-    for (const char* id : { "attack", "decay", "sustain", "release", "cutoff", "reso", "transpose", "gain" })
+    for (const char* id : { "attack", "decay", "sustain", "release", "cutoff", "reso", "transpose", "level" })
     {
         const juce::String sid (id);
-        auto* k = voiceKnobs.add (new Knob (spec (id), sid == "transpose" || sid == "gain"));
-        k->attach (processor.apvts);
+        voiceIds.add (sid);
+        auto* k = voiceKnobs.add (new Knob (spec (id), sid == "transpose" || sid == "level"));
         addAndMakeVisible (k);
     }
     for (const char* id : { "chance", "repeat", "lfoRate", "lfoDepth" })
     {
+        motionIds.add (id);
         auto* k = motionKnobs.add (new Knob (spec (id), false));
-        k->attach (processor.apvts);
         addAndMakeVisible (k);
     }
 
@@ -1089,7 +1206,7 @@ void Content::setLanguage (Lang l)
     for (auto* k : sliceKnobs) k->setLanguage (l);
     for (auto* k : voiceKnobs) k->setLanguage (l);
     for (auto* k : motionKnobs) k->setLanguage (l);
-    for (auto* s : { &modeSwitch, &filterSwitch, &orderSwitch }) s->setLanguage (l);
+    for (auto* s : { &modeSwitch, &filterSwitch, &orderSwitch, &stereoSwitch }) s->setLanguage (l);
     midiDragger.setLanguage (l);
     updateTexts();
     repaint();
@@ -1101,16 +1218,14 @@ void Content::updateTexts()
     for (int i = 0; i < 4; ++i) switchBox.changeItemText (i + 1, tr (lang, switchKeys[i]));
     const char* lfoKeys[] { "cutoffDest", "pitchDest", "panDest", "levelDest" };
     for (int i = 0; i < 4; ++i) lfoBox.changeItemText (i + 1, tr (lang, lfoKeys[i]));
-    for (int i = 0; i < maxPairs; ++i)
-    {
-        const auto chans = juce::String (i * 2 + 1) + u8 ("–") + juce::String (i * 2 + 2);
-        outBox.changeItemText (i + 1, i == 0 ? (lang == Lang::es ? "Princ. " : "Main ") + chans : (lang == Lang::es ? "Sal. " : "Out ") + chans);
-    }
     // the shown text does not follow changeItemText: select again
+    const int lfoIndex = choiceIndex (processor, loopId (processor.editSlot(), "lfoDest"));
     switchBox.setSelectedItemIndex (choiceIndex (processor, "switchAt"), juce::dontSendNotification);
-    lfoBox.setSelectedItemIndex (choiceIndex (processor, "lfoDest"), juce::dontSendNotification);
+    lfoBox.setSelectedItemIndex (lfoIndex, juce::dontSendNotification);
     switchBox.setText (switchBox.getItemText (choiceIndex (processor, "switchAt")), juce::dontSendNotification);
-    lfoBox.setText (lfoBox.getItemText (choiceIndex (processor, "lfoDest")), juce::dontSendNotification);
+    lfoBox.setText (lfoBox.getItemText (lfoIndex), juce::dontSendNotification);
+    stereoSwitch.setTooltip (tr (lang, "stereoTip"));
+    outBox.setTooltip (tr (lang, "outTip"));
     resliceButton.setButtonText (tr (lang, "reslice"));
     splitButton.setButtonText (tr (lang, "split"));
     mergeButton.setButtonText (tr (lang, "merge"));
@@ -1129,11 +1244,24 @@ void Content::updateTexts()
     orderSwitch.setTooltip (lang == Lang::es ? u8 ("En qué orden toca las rebanadas el loop") : "The order in which the loop plays its slices");
 }
 
+void Content::attachLoop (int slot)
+{
+    attachedSlot = slot;
+    for (int i = 0; i < voiceKnobs.size(); ++i) voiceKnobs[i]->attach (processor.apvts, loopId (slot, voiceIds[i].toRawUTF8()));
+    for (int i = 0; i < motionKnobs.size(); ++i) motionKnobs[i]->attach (processor.apvts, loopId (slot, motionIds[i].toRawUTF8()));
+    lfoAttachment.reset();
+    lfoAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment> (processor.apvts, loopId (slot, "lfoDest"), lfoBox);
+    updateTexts();
+    for (auto* c : { (juce::Component*) &modeSwitch, (juce::Component*) &filterSwitch, (juce::Component*) &orderSwitch, (juce::Component*) &tempo })
+        c->repaint();
+}
+
 void Content::refreshSlot (bool force)
 {
     const int s = processor.editSlot();
     const int v = processor.getVersion();
     if (! force && s == shownSlot && v == shownVersion) return;
+    if (s != attachedSlot) attachLoop (s);
     shownSlot = s;
     shownVersion = v;
     info = processor.slotInfo (s);
@@ -1144,7 +1272,8 @@ void Content::refreshSlot (bool force)
     for (juce::Component* c : { (juce::Component*) &detect, (juce::Component*) &resliceButton, (juce::Component*) &splitButton,
                                 (juce::Component*) &mergeButton, (juce::Component*) &midiDragger, (juce::Component*) &barsDown,
                                 (juce::Component*) &barsUp, (juce::Component*) &prevButton, (juce::Component*) &nextButton,
-                                (juce::Component*) &reverseButton, (juce::Component*) &muteButton, (juce::Component*) &outBox })
+                                (juce::Component*) &reverseButton, (juce::Component*) &muteButton, (juce::Component*) &outBox,
+                                (juce::Component*) &stereoSwitch })
         c->setEnabled (loaded);
     for (auto* k : sliceKnobs) k->setEnabled (loaded);
     barsDown.setVisible (loaded);
@@ -1167,9 +1296,31 @@ void Content::refreshSlice()
     }
     reverseButton.setToggleState (sp.reverse, juce::dontSendNotification);
     muteButton.setToggleState (sp.mute, juce::dontSendNotification);
-    outBox.setSelectedId (sp.out + 1, juce::dontSendNotification);
+    fillOutputs (sp);
     wave.repaint();
     repaint (20, 440, 434, 50);
+}
+
+// The channel menu lists pairs (1–2 … 63–64) or single channels (1 … 64);
+// the ones the track does not have are greyed out.
+void Content::fillOutputs (const SliceParams& sp)
+{
+    const int outs = processor.numOutputs();
+    shownStereo = sp.stereo;
+    shownOutputs = outs;
+    outBox.clear (juce::dontSendNotification);
+    if (sp.stereo)
+        for (int i = 0; i < maxOutputs / 2; ++i)
+            outBox.addItem (juce::String (i * 2 + 1) + u8 ("–") + juce::String (i * 2 + 2), i + 1);
+    else
+        for (int i = 0; i < maxOutputs; ++i) outBox.addItem (juce::String (i + 1), i + 1);
+    for (int i = 0; i < outBox.getNumItems(); ++i)
+    {
+        const int last = sp.stereo ? i * 2 + 1 : i;
+        outBox.setItemEnabled (i + 1, last < outs || (sp.stereo && i == 0));
+    }
+    outBox.setSelectedId (sp.stereo ? sp.out / 2 + 1 : sp.out + 1, juce::dontSendNotification);
+    stereoSwitch.repaint();
 }
 
 void Content::selectSlice (int index)
@@ -1254,18 +1405,17 @@ void Content::timerCallback()
     if (s != shownSlot || processor.getVersion() != shownVersion) refreshSlot (s != shownSlot);
     if (processor.selectedSlice (s) != shownSelected) refreshSlice();
 
-    int outs = 0;
-    for (int i = 0; i < maxPairs; ++i) if (processor.pairActive (i)) outs |= 1 << i;
-    if (outs != shownOutputs)
+    if (processor.numOutputs() != shownOutputs)
     {
-        shownOutputs = outs;
-        for (int i = 0; i < maxPairs; ++i) outBox.setItemEnabled (i + 1, (outs >> i) & 1);
+        refreshSlice();
+        outputDisplay.repaint();   // it shows the channel count
     }
 
     std::array<bool, maxSlots> loaded {};
     for (int i = 0; i < maxSlots; ++i) loaded[(size_t) i] = processor.slotLoaded (i);
     slots.update (telemetry, s, loaded, lang);
     tempo.update (telemetry, lang);
+    outputDisplay.update (telemetry, lang);
     wave.update (telemetry, lang);
     keys.update (telemetry, s, info.numSlices, shownSelected, lang);
     modeSwitch.repaint();
@@ -1295,8 +1445,7 @@ void Content::paint (juce::Graphics& g)
         g.setColour (line);
         g.fillRect (246, 30, 1, 36);
         g.setColour (sub);
-        drawCaps (g, tr (lang, "loops"), { 258.0f, 40.0f, 44.0f, 16.0f });
-        drawCaps (g, tr (lang, "switchAt"), { 997.0f, 24.0f, 112.0f, 14.0f }, juce::Justification::centredLeft, 10.0f);
+        drawCaps (g, tr (lang, "switchAt"), { 999.0f, 24.0f, 112.0f, 14.0f }, juce::Justification::centredLeft, 10.0f);
     }
 
     // screen
@@ -1365,7 +1514,7 @@ void Content::paint (juce::Graphics& g)
         }
         juce::ignoreUnused (s);
         g.setColour (sub);
-        drawCaps (g, tr (lang, "out"), { 268.0f, 598.0f, 64.0f, 32.0f }, juce::Justification::centredRight, 10.0f);
+        drawCaps (g, tr (lang, "out"), { 232.0f, 598.0f, 48.0f, 32.0f }, juce::Justification::centredRight, 10.0f);
         drawCaps (g, tr (lang, "voice"), { 483.0f, 452.0f, 320.0f, 16.0f }, juce::Justification::centredLeft, 10.5f);
         drawCaps (g, tr (lang, "motion"), { 847.0f, 452.0f, 320.0f, 16.0f }, juce::Justification::centredLeft, 10.5f);
         drawCaps (g, tr (lang, "lfoTo") + u8 (" →"), { 847.0f, 628.0f, 60.0f, 30.0f }, juce::Justification::centredLeft, 10.5f);
@@ -1375,11 +1524,12 @@ void Content::paint (juce::Graphics& g)
 void Content::resized()
 {
     // header
-    slots.setBounds (302, 26, 323, 44);
-    playButton.setBounds (637, 26, 54, 44);
-    modeSwitch.setBounds (701, 26, 116, 44);
-    tempo.setBounds (827, 26, 160, 44);
-    switchBox.setBounds (997, 40, 112, 28);
+    slots.setBounds (260, 26, 323, 44);
+    playButton.setBounds (593, 26, 54, 44);
+    modeSwitch.setBounds (657, 26, 116, 44);
+    tempo.setBounds (783, 26, 112, 44);
+    outputDisplay.setBounds (903, 26, 88, 44);
+    switchBox.setBounds (999, 40, 110, 28);
     langEn.setBounds (1117, 40, 30, 28);
     langEs.setBounds (1150, 40, 30, 28);
 
@@ -1399,9 +1549,10 @@ void Content::resized()
     prevButton.setBounds (367, 454, 32, 28);
     nextButton.setBounds (405, 454, 32, 28);
     for (int i = 0; i < sliceKnobs.size(); ++i) sliceKnobs[i]->setBounds (27 + i * 68, 494, Knob::width, Knob::height);
-    reverseButton.setBounds (36, 596, 112, 38);
-    muteButton.setBounds (156, 596, 96, 38);
-    outBox.setBounds (337, 599, 100, 32);
+    reverseButton.setBounds (36, 596, 104, 38);
+    muteButton.setBounds (146, 596, 84, 38);
+    stereoSwitch.setBounds (284, 599, 66, 32);
+    outBox.setBounds (356, 599, 81, 32);
 
     // amp envelope and filter
     for (int i = 0; i < 4; ++i) voiceKnobs[i]->setBounds (474 + i * 80, 478, Knob::width, Knob::height);

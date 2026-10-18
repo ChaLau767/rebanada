@@ -28,10 +28,12 @@ Primeros pasos
   - Las notas desde Do2 (C2) tocan cada rebanada; Do0–Sol0 (C0–G0) eligen el loop.
   - Arrastrá «Drag MIDI to track» a una pista para tener el loop como notas.
 
-Salidas separadas
-  Cada rebanada puede ir a su propio par de salidas (Out 3–4 … 15–16).
-  En Reaper, abrí el botón de enrutamiento del plugin («2 in 2 out») y
-  mandá esas salidas a otras pistas.
+Salidas separadas (hasta 64 canales)
+  Cada rebanada sale por un canal (M) o por un par (ST). En Reaper, poné
+  «Track channels» de la pista en la cantidad que quieras y mandá esos
+  canales a otras pistas con el botón de enrutamiento de la pista.
+  Cada loop tiene además sus propios ajustes, automatizables por separado
+  (L1 … L8). Rueda del mouse sobre la forma de onda: zoom.
 
 La aplicación independiente toca el loop con su propio tempo
 (arrastrá el número de BPM para cambiarlo) y acepta un teclado MIDI:

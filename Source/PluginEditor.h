@@ -61,7 +61,7 @@ public:
     void paint (juce::Graphics&) override;
     void resized() override;
     void setLanguage (Lang);
-    void attach (juce::AudioProcessorValueTreeState&);     // for host parameters
+    void attach (juce::AudioProcessorValueTreeState&, const juce::String& paramId);   // for host parameters
     juce::Slider slider;
     std::function<void (float)> onChange;                  // for slice settings
     static constexpr int width = 72, dial = 54, height = 88;
@@ -124,9 +124,11 @@ public:
     void mouseUp (const juce::MouseEvent&) override;
     void mouseDoubleClick (const juce::MouseEvent&) override;
     void update (const Telemetry&, Lang);
+    bool output = false;     // shows and drags the output level instead
 
 private:
     juce::RangedAudioParameter* target() const;
+    bool freeMode() const;
     RebanadaProcessor& processor;
     Telemetry tele;
     Lang lang = Lang::en;
@@ -146,13 +148,21 @@ public:
     void mouseDrag (const juce::MouseEvent&) override;
     void mouseUp (const juce::MouseEvent&) override;
     void mouseDoubleClick (const juce::MouseEvent&) override;
+    void mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails&) override;
+    void mouseMagnify (const juce::MouseEvent&, float scale) override;
     void setInfo (int slot, const RebanadaProcessor::SlotInfo&);
     void update (const Telemetry&, Lang);
+    void zoomAround (double frame, double factor);   // factor < 1 zooms in
     std::function<void()> onSelectionChange, onLoadRequest;
-    static constexpr int labelHeight = 22;
+    static constexpr int labelHeight = 22, barHeight = 12;
 
 private:
     juce::Rectangle<float> waveArea() const;
+    juce::Rectangle<float> scrollArea() const;
+    double totalFrames() const;
+    double visStart() const;
+    double visLen() const;
+    void panBy (double frames);
     float xFor (int frame) const;
     int frameFor (float x) const;
     int markerAt (juce::Point<float>) const;   // marker index (>0), or -1
@@ -163,8 +173,12 @@ private:
     RebanadaProcessor::SlotInfo info;
     int slot = 0;
     const Sample* peaksFor = nullptr;
-    int peaksSlices = -1;
     std::vector<float> peaks;
+    float loudest = 1.0f;
+    double peaksStart = -1.0, peaksLen = -1.0;
+    double viewStart = 0.0, viewLen = 0.0;     // viewLen 0: the whole sample
+    bool scrolling = false;
+    double scrollGrab = 0.0;
     Telemetry tele;
     Lang lang = Lang::en;
     int dragMarker = -1, hoverMarker = -1;
@@ -231,6 +245,8 @@ private:
     void setLanguage (Lang);
     void refreshSlot (bool force);
     void refreshSlice();
+    void attachLoop (int slot);
+    void fillOutputs (const SliceParams&);
     void selectSlice (int index);
     void editSlice (const std::function<void (SliceParams&)>&);
     void chooseFile (int slot);
@@ -246,7 +262,7 @@ private:
     juce::TextButton playButton;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> playAttachment;
     Segmented modeSwitch;
-    TempoDisplay tempo;
+    TempoDisplay tempo, outputDisplay;
     juce::ComboBox switchBox, lfoBox, outBox;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> switchAttachment, lfoAttachment;
 
@@ -258,12 +274,14 @@ private:
 
     juce::OwnedArray<Knob> sliceKnobs, voiceKnobs, motionKnobs;
     juce::TextButton prevButton, nextButton, reverseButton, muteButton;
-    Segmented filterSwitch, orderSwitch;
+    Segmented filterSwitch, orderSwitch, stereoSwitch;
+    juce::StringArray voiceIds, motionIds;
     KeyStrip keys;
 
     std::unique_ptr<juce::FileChooser> chooser;
     RebanadaProcessor::SlotInfo info;
-    int shownSlot = -1, shownVersion = -1, shownSelected = -1, shownOutputs = -1;
+    int shownSlot = -1, shownVersion = -1, shownSelected = -1, shownOutputs = -1, attachedSlot = -1;
+    bool shownStereo = true;
     bool dropHover = false;
     Telemetry telemetry;
 };

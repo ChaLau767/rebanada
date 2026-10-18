@@ -69,18 +69,32 @@ int main (int argc, char** argv)
     check (plugin != nullptr, "plugin instance created " + error);
     if (plugin == nullptr) return 1;
 
-    check (plugin->getBusCount (false) == 8, "eight output buses: main plus seven extra pairs (" + juce::String (plugin->getBusCount (false)) + ")");
+    // output layouts: mono, stereo, named speaker sets and 64 channels (a 7th-order ambisonic arrangement)
+    juce::Array<juce::AudioChannelSet::ChannelType> namedTypes;
+    for (int t = juce::AudioChannelSet::left; t < juce::AudioChannelSet::discreteChannel0; ++t)
     {
+        const auto type = (juce::AudioChannelSet::ChannelType) t;
+        if (type >= juce::AudioChannelSet::ambisonicACN0 && type <= juce::AudioChannelSet::ambisonicACN35) continue;
+        if (juce::AudioChannelSet::getAbbreviatedChannelTypeName (type).isNotEmpty()) namedTypes.add (type);
+    }
+    for (int outs : { 1, 2, 4, 8, 16, 24, 64 })
+    {
+        juce::AudioChannelSet set;
+        if (outs == 1) set = juce::AudioChannelSet::mono();
+        else if (outs == 2) set = juce::AudioChannelSet::stereo();
+        else if (outs == 64) set = juce::AudioChannelSet::ambisonic (7);
+        else for (int i = 0; i < outs; ++i) set.addChannel (namedTypes[i]);
         juce::AudioProcessor::BusesLayout layout;
-        for (int i = 0; i < plugin->getBusCount (false); ++i) layout.outputBuses.add (juce::AudioChannelSet::stereo());
-        check (plugin->setBusesLayout (layout) && plugin->getTotalNumOutputChannels() == 16, "all sixteen outputs enabled");
+        layout.outputBuses.add (set);
+        check (plugin->setBusesLayout (layout) && plugin->getTotalNumOutputChannels() == outs,
+               "layout with " + juce::String (outs) + " outputs accepted (" + juce::String (plugin->getTotalNumOutputChannels()) + ")");
     }
     {
         juce::AudioProcessor::BusesLayout layout;
         layout.outputBuses.add (juce::AudioChannelSet::stereo());
-        for (int i = 1; i < plugin->getBusCount (false); ++i) layout.outputBuses.add (juce::AudioChannelSet::disabled());
         check (plugin->setBusesLayout (layout) && plugin->getTotalNumOutputChannels() == 2, "back to stereo");
     }
+    check (plugin->getParameters().size() >= 4 + 8 * 17, "every loop has its own parameters (" + juce::String (plugin->getParameters().size()) + ")");
 
     PlayHead head;
     plugin->setPlayHead (&head);
