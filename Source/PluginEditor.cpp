@@ -116,10 +116,19 @@ void LookAndFeel::drawLinearSlider (juce::Graphics& g, int x, int y, int w, int 
     const auto track = juce::Rectangle<float> ((float) x, cy - 2.0f, (float) w, 4.0f);
     g.setColour (colours::line);
     g.fillRoundedRectangle (track, 2.0f);
-    g.setColour (s.isEnabled() ? colours::accent : colours::faint);
-    g.fillRoundedRectangle (track.withRight (pos), 2.0f);
+    const juce::Colour fill = s.getProperties().contains ("fill") ? juce::Colour ((juce::uint32) (juce::int64) s.getProperties()["fill"]) : colours::accent;
+    g.setColour (s.isEnabled() ? fill : colours::faint);
+    if (s.getProperties().getWithDefault ("bipolar", false))
+    {
+        const float mid = x + w * 0.5f;
+        g.fillRoundedRectangle (juce::Rectangle<float> (juce::jmin (mid, pos), cy - 2.0f, std::abs (pos - mid), 4.0f), 2.0f);
+        g.setColour (colours::sub);
+        g.fillRect (mid - 0.5f, cy - 5.0f, 1.0f, 10.0f);
+    }
+    else g.fillRoundedRectangle (track.withRight (pos), 2.0f);
     g.setColour (s.isEnabled() ? colours::text : colours::faint);
-    g.fillEllipse (pos - 7.0f, cy - 7.0f, 14.0f, 14.0f);
+    const float t = s.getProperties().getWithDefault ("bipolar", false) ? 5.0f : 7.0f;
+    g.fillEllipse (pos - t, cy - t, t * 2.0f, t * 2.0f);
 }
 
 void LookAndFeel::drawButtonBackground (juce::Graphics& g, juce::Button& b, const juce::Colour&, bool over, bool down)
@@ -255,7 +264,45 @@ Knob::Knob (const FloatSpec& s, bool bipolar) : spec (s)
         repaint();
         if (onChange) onChange ((float) slider.getValue());
     };
+    slider.onPopup = [this] { if (onModMenu) onModMenu(); };
     addAndMakeVisible (slider);
+}
+
+void Knob::setModulation (float depth, float offset, juce::Colour c, const juce::String& badge)
+{
+    if (std::abs (depth - modDepth) < 1.0e-4f && std::abs (offset - modOffset) < 1.0e-3f && c == modColour && badge == modBadge) return;
+    modDepth = depth; modOffset = offset; modColour = c; modBadge = badge;
+    repaint();
+}
+
+void Knob::paintOverChildren (juce::Graphics& g)
+{
+    if (modDepth <= 0.0f) return;
+    const auto b = slider.getBounds().toFloat();
+    const float cx = b.getCentreX(), cy = b.getCentreY();
+    const float r = juce::jmin (b.getWidth(), b.getHeight()) * 0.5f - 1.5f;
+    const float start = pi * 1.25f, end = pi * 2.75f;
+    const float base = (float) slider.valueToProportionOfLength (slider.getValue());
+    const float lo = juce::jlimit (0.0f, 1.0f, base - modDepth), hi = juce::jlimit (0.0f, 1.0f, base + modDepth);
+    const float alpha = isEnabled() ? 1.0f : 0.4f;
+    juce::Path arc;
+    arc.addCentredArc (cx, cy, r, r, 0.0f, start + lo * (end - start), start + juce::jmax (hi, lo + 0.004f) * (end - start), true);
+    g.setColour (colours::panel);
+    g.strokePath (arc, juce::PathStrokeType (4.6f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+    g.setColour (modColour.withMultipliedAlpha (alpha));
+    g.strokePath (arc, juce::PathStrokeType (2.2f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+    const float now = juce::jlimit (0.0f, 1.0f, base + modOffset);
+    const float a = start + now * (end - start);
+    const float dx = cx + std::sin (a) * r, dy = cy - std::cos (a) * r;
+    g.setColour (colours::ground);
+    g.fillEllipse (dx - 4.0f, dy - 4.0f, 8.0f, 8.0f);
+    g.setColour (modColour.withMultipliedAlpha (alpha));
+    g.fillEllipse (dx - 2.6f, dy - 2.6f, 5.2f, 5.2f);
+    if (modBadge.isNotEmpty())
+    {
+        g.setFont (monoBold (9.5f));
+        g.drawText (modBadge, juce::Rectangle<float> ((float) width - 22.0f, 0.0f, 22.0f, 11.0f), juce::Justification::centredRight, false);
+    }
 }
 
 void Knob::attach (juce::AudioProcessorValueTreeState& apvts, const juce::String& paramId)
@@ -270,7 +317,8 @@ void Knob::setLanguage (Lang l)
 {
     lang = l;
     const juce::String note = u8 (lang == Lang::es ? spec.noteEs : spec.noteEn);
-    slider.setTooltip ((note.isEmpty() ? juce::String() : note + ". ") + tr (lang, "dblclick") + ".");
+    slider.setTooltip ((note.isEmpty() ? juce::String() : note + ". ") + tr (lang, "dblclick") + "."
+                       + (onModMenu ? " " + tr (lang, "rightClickMod") + "." : juce::String()));
     repaint();
 }
 
@@ -283,7 +331,8 @@ void Knob::paint (juce::Graphics& g)
 {
     const float alpha = isEnabled() ? 1.0f : 0.45f;
     g.setColour (colours::sub.withMultipliedAlpha (alpha));
-    drawCaps (g, u8 (lang == Lang::es ? spec.es : spec.en), { 0.0f, (float) dial + 3.0f, (float) width, 14.0f },
+    const char* name = lang == Lang::es ? (nameEs != nullptr ? nameEs : spec.es) : (nameEn != nullptr ? nameEn : spec.en);
+    drawCaps (g, u8 (name), { 0.0f, (float) dial + 3.0f, (float) width, 14.0f },
               juce::Justification::centred, 10.0f);
     g.setColour (colours::text.withMultipliedAlpha (alpha));
     g.setFont (mono (12.0f));
@@ -325,7 +374,7 @@ void Segmented::paint (juce::Graphics& g)
         auto cell = vertical ? juce::Rectangle<float> (r.getX(), r.getY() + r.getHeight() * i / n, r.getWidth(), r.getHeight() / n)
                              : juce::Rectangle<float> (r.getX() + r.getWidth() * i / n, r.getY(), r.getWidth() / n, r.getHeight());
         const bool on = i == current;
-        if (on) { g.setColour (isEnabled() ? colours::accent : colours::faint); g.fillRect (cell); }
+        if (on) { g.setColour (isEnabled() ? onColour : colours::faint); g.fillRect (cell); }
         else if (i > 0)
         {
             g.setColour (colours::line);
@@ -732,9 +781,10 @@ void WaveView::paint (juce::Graphics& g)
         auto box = juce::Rectangle<float> (x, 0.0f, w, (float) labelHeight - 2.0f);
         if (box.getRight() > (float) getWidth()) box.setX ((float) getWidth() - w);
         const auto& sp = params[(size_t) i];
+        const auto gc = colours::group (sp.group);   // the label shows the slice's modulation group
         if (on)
         {
-            g.setColour (colours::accent);
+            g.setColour (gc);
             g.fillRoundedRectangle (box, 3.0f);
             g.setColour (dark);
         }
@@ -742,9 +792,9 @@ void WaveView::paint (juce::Graphics& g)
         {
             g.setColour (colours::screen);
             g.fillRoundedRectangle (box, 3.0f);
-            g.setColour (colours::accent.withAlpha (sp.mute ? 0.2f : 0.45f));
+            g.setColour (gc.withAlpha (sp.mute ? 0.2f : 0.5f));
             g.drawRoundedRectangle (box.reduced (0.5f), 3.0f, 1.0f);
-            g.setColour (sp.mute ? colours::faint : (sp.reverse ? colours::reverse : colours::accent));
+            g.setColour (sp.mute ? colours::faint : (sp.reverse ? colours::reverse : gc));
         }
         g.drawText (label, box, juce::Justification::centred);
         lastLabelEnd = box.getRight();
@@ -1021,6 +1071,471 @@ namespace
     }
 }
 
+//==============================================================================
+namespace
+{
+    const FloatSpec& divisionSpec()
+    {
+        static const FloatSpec s { "div", "Division", "División", 0.0f, (float) (modlib::numDivisions - 1), 4.0f, "", 0, FloatSpec::linear, false,
+                                   "Length of one cycle, locked to the tempo", "Duración de un ciclo, atada al tempo", 1.0f };
+        return s;
+    }
+    const FloatSpec& modSpec (const char* id) { return findSpec (modSpecs(), id); }
+
+    juce::Path shapeIcon (int shape, juce::Rectangle<float> r)
+    {
+        juce::Path p;
+        auto pt = [&] (float x, float y) { return juce::Point<float> (r.getX() + x * r.getWidth(), r.getY() + (0.5f - 0.5f * y) * r.getHeight()); };
+        if (shape == modlib::steps)
+        {
+            const float v[] { 0.2f, 0.9f, -0.6f, 0.4f, -0.9f };
+            p.startNewSubPath (pt (0.0f, v[0]));
+            for (int i = 0; i < 5; ++i) { p.lineTo (pt (i / 5.0f, v[i])); p.lineTo (pt ((i + 1) / 5.0f, v[i])); }
+            return p;
+        }
+        const float a[] { 0.2f, 0.9f, -0.6f, 0.4f, -0.9f, 0.1f };
+        for (int i = 0; i <= 60; ++i)
+        {
+            const float t = i / 60.0f;
+            float y = 0.0f;
+            if (shape == modlib::smooth)
+            {
+                const int k = juce::jmin (4, (int) (t * 5.0f));
+                const float f = t * 5.0f - k, sm = 0.5f - 0.5f * std::cos (f * pi);
+                y = a[k] + (a[k + 1] - a[k]) * sm;
+            }
+            else y = modlib::shapeValue (shape, t * 2.0, 0.0f, 0.0f);
+            if (i == 0) p.startNewSubPath (pt (t, y)); else p.lineTo (pt (t, y));
+        }
+        return p;
+    }
+
+    juce::String groupSourceName (int s, Lang lang)
+    {
+        if (s <= 0) return tr (lang, "none");
+        static const char* n[] { "", "LFO 1", "LFO 2", "ENV", "RND" };
+        return n[juce::jlimit (0, 4, s)];
+    }
+    juce::String loopSourceName (int s, Lang lang)
+    {
+        if (s <= 0) return tr (lang, "none");
+        return groupLetter ((s - 1) / 2) + u8 ("·LFO ") + juce::String ((s - 1) % 2 + 1);
+    }
+    juce::String badgeFor (int s, bool loop)
+    {
+        if (s <= 0) return {};
+        if (loop) return groupLetter ((s - 1) / 2) + juce::String ((s - 1) % 2 + 1);
+        static const char* n[] { "", "L1", "L2", "ENV", "RND" };
+        return n[juce::jlimit (0, 4, s)];
+    }
+}
+
+//==============================================================================
+void GroupPicker::paint (juce::Graphics& g)
+{
+    const float w = getWidth() / (float) numGroups;
+    for (int i = 0; i < numGroups; ++i)
+    {
+        auto cell = juce::Rectangle<float> (i * w, 0.0f, w, (float) getHeight()).reduced (2.0f, 0.5f);
+        const auto c = colours::group (i);
+        const bool on = i == value;
+        const float alpha = isEnabled() ? 1.0f : 0.4f;
+        if (on) { g.setColour (c.withMultipliedAlpha (alpha)); g.fillRoundedRectangle (cell, 5.0f); }
+        else
+        {
+            g.setColour (colours::ground);
+            g.fillRoundedRectangle (cell, 5.0f);
+            g.setColour (c.withAlpha (0.5f * alpha));
+            g.drawRoundedRectangle (cell.reduced (0.5f), 5.0f, 1.0f);
+        }
+        g.setColour (on ? dark : c.withMultipliedAlpha (alpha));
+        g.setFont (monoBold (13.0f));
+        g.drawText (groupLetter (i), cell, juce::Justification::centred);
+    }
+}
+
+void GroupPicker::mouseDown (const juce::MouseEvent& e)
+{
+    if (! isEnabled()) return;
+    const int i = juce::jlimit (0, numGroups - 1, (int) (e.position.x / getWidth() * numGroups));
+    value = i;
+    if (onPick) onPick (i);
+    repaint();
+}
+
+//==============================================================================
+void ShapePicker::paint (juce::Graphics& g)
+{
+    if (param == nullptr) return;
+    const int n = modlib::numShapes;
+    const int current = juce::roundToInt (param->getValue() * (n - 1));
+    const float w = getWidth() / (float) n;
+    for (int i = 0; i < n; ++i)
+    {
+        auto cell = juce::Rectangle<float> (i * w, 0.0f, w, (float) getHeight()).reduced (2.0f, 0.5f);
+        const bool on = i == current;
+        g.setColour (colours::ground);
+        g.fillRoundedRectangle (cell, 5.0f);
+        g.setColour (on ? colour : colours::line);
+        g.drawRoundedRectangle (cell.reduced (0.5f), 5.0f, 1.0f);
+        g.setColour (on ? colour : colours::sub);
+        g.strokePath (shapeIcon (i, cell.reduced (7.0f, 7.0f)), juce::PathStrokeType (1.5f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+    }
+}
+
+void ShapePicker::mouseDown (const juce::MouseEvent& e)
+{
+    if (param == nullptr) return;
+    const int n = modlib::numShapes;
+    const int i = juce::jlimit (0, n - 1, (int) (e.position.x / getWidth() * n));
+    param->beginChangeGesture();
+    param->setValueNotifyingHost ((float) i / (float) (n - 1));
+    param->endChangeGesture();
+    repaint();
+}
+
+//==============================================================================
+RouteRow::RouteRow (RebanadaProcessor& p) : processor (p)
+{
+    amount.setSliderStyle (juce::Slider::LinearHorizontal);
+    amount.setTextBoxStyle (juce::Slider::NoTextBox, true, 0, 0);
+    amount.setDoubleClickReturnValue (true, 0.0);
+    amount.getProperties().set ("bipolar", true);
+    amount.onValueChange = [this] { repaint(); };
+    source.onChange = [this] { repaint(); };
+    for (auto* b : { &source, &target }) b->getProperties().set ("small", true);
+    for (auto* c : { (juce::Component*) &source, (juce::Component*) &target, (juce::Component*) &amount }) addAndMakeVisible (c);
+}
+
+juce::String RouteRow::id (const char* what) const { return group < 0 ? loopRouteId (index, what) : groupRouteId (group, index, what); }
+
+void RouteRow::attach (int g, int i)
+{
+    group = g; index = i;
+    sourceAttachment.reset(); targetAttachment.reset(); amountAttachment.reset();
+    source.clear (juce::dontSendNotification);
+    target.clear (juce::dontSendNotification);
+    source.addItemList (group < 0 ? loopSourceChoices() : groupSourceChoices(), 1);
+    juce::StringArray names;
+    for (const auto& d : group < 0 ? loopDestinations() : voiceDestinations()) names.add (u8 (d.en));
+    target.addItemList (names, 1);
+    sourceAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment> (processor.apvts, id ("Src"), source);
+    targetAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment> (processor.apvts, id ("Dest"), target);
+    amountAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (processor.apvts, id ("Amt"), amount);
+    amount.setDoubleClickReturnValue (true, 0.0);
+    setLanguage (lang);
+}
+
+void RouteRow::setLanguage (Lang l)
+{
+    lang = l;
+    // read the selection before renaming: a combo box forgets it when its text changes
+    const int srcIndex = juce::roundToInt (processor.apvts.getRawParameterValue (id ("Src"))->load());
+    const int dstIndex = juce::roundToInt (processor.apvts.getRawParameterValue (id ("Dest"))->load());
+    for (int k = 0; k < source.getNumItems(); ++k)
+        source.changeItemText (k + 1, group < 0 ? loopSourceName (k, l) : groupSourceName (k, l));
+    const auto& d = group < 0 ? loopDestinations() : voiceDestinations();
+    for (int k = 0; k < (int) d.size(); ++k) target.changeItemText (k + 1, u8 (l == Lang::es ? d[(size_t) k].es : d[(size_t) k].en));
+    source.setText (source.getItemText (srcIndex), juce::dontSendNotification);
+    target.setText (target.getItemText (dstIndex), juce::dontSendNotification);
+    amount.setTooltip (u8 (l == Lang::es ? routeAmountSpec().noteEs : routeAmountSpec().noteEn));
+    repaint();
+}
+
+void RouteRow::resized()
+{
+    source.setBounds (18, 0, 82, getHeight());
+    target.setBounds (114, 0, 104, getHeight());
+    amount.setBounds (222, 0, 66, getHeight());
+}
+
+void RouteRow::paint (juce::Graphics& g)
+{
+    amount.getProperties().set ("fill", (juce::int64) colour.getARGB());
+    const bool active = source.getSelectedItemIndex() > 0;
+    g.setColour (active ? colour : colours::faint);
+    g.setFont (mono (11.0f));
+    g.drawText (juce::String (index + 1), 0, 0, 16, getHeight(), juce::Justification::centred);
+    g.setColour (colours::sub);
+    g.drawText (u8 ("→"), 100, 0, 14, getHeight(), juce::Justification::centred);
+    g.setColour (active ? colours::text : colours::faint);
+    g.drawText (localNumber (formatValue (routeAmountSpec(), (float) amount.getValue()), lang), getWidth() - 40, 0, 40, getHeight(), juce::Justification::centredRight);
+}
+
+//==============================================================================
+ModPage::ModPage (RebanadaProcessor& p)
+    : processor (p),
+      sources ({ "LFO 1", "LFO 2", "ENV", "RND" }, false, [this] { return source; }, [this] (int i) { showSource (i); }),
+      sync ({ "free", "sync" }, false,
+            [this] { return target < loopTarget && source < 2 ? choiceIndex (processor, groupId (target, "lfo" + juce::String (source + 1) + "Sync")) : 0; },
+            [this] (int i) { if (target < loopTarget && source < 2) setChoice (processor, groupId (target, "lfo" + juce::String (source + 1) + "Sync"), i); resized(); }),
+      rate (modSpec ("lfo1Rate"), false), division (divisionSpec(), false), phase (modSpec ("lfo1Phase"), false),
+      envAttack (modSpec ("envAttack"), false), envHold (modSpec ("envHold"), false), envDecay (modSpec ("envDecay"), false)
+{
+    sources.setPlainLabels (true);
+    sources.monoFont = true;
+    sources.fontSize = 12.0f;
+    sync.fontSize = 11.5f;
+    sync.capsLabels = true;
+    rate.setNames ("Rate", "Velocidad");
+    division.setNames ("Division", "División");
+    phase.setNames ("Phase", "Fase");
+    envAttack.setNames ("Attack", "Ataque");
+    envHold.setNames ("Hold", "Sostén");
+    envDecay.setNames ("Decay", "Caída");
+    for (auto* c : { (juce::Component*) &sources, (juce::Component*) &sync, (juce::Component*) &shapes, (juce::Component*) &rate,
+                     (juce::Component*) &division, (juce::Component*) &phase, (juce::Component*) &envAttack,
+                     (juce::Component*) &envHold, (juce::Component*) &envDecay })
+        addChildComponent (c);
+    for (int i = 0; i < groupRoutes; ++i) addChildComponent (rows.add (new RouteRow (p)));
+    showTarget (0);
+}
+
+void ModPage::setLanguage (Lang l)
+{
+    lang = l;
+    for (auto* k : { &rate, &division, &phase, &envAttack, &envHold, &envDecay }) k->setLanguage (l);
+    sources.setLanguage (l);
+    sync.setLanguage (l);
+    for (auto* r : rows) r->setLanguage (l);
+    shapes.setTooltip (tr (l, "shapeTip"));
+    sync.setTooltip (tr (l, "syncTip"));
+    repaint();
+}
+
+juce::Rectangle<int> ModPage::tabArea (int t) const
+{
+    if (t < loopTarget) return { 16 + t * 42, 12, 38, 26 };
+    return { 16 + numGroups * 42 + 4, 12, 66, 26 };
+}
+
+void ModPage::showTarget (int t)
+{
+    target = juce::jlimit (0, loopTarget, t);
+    attachControls();
+    repaint();
+}
+
+void ModPage::showSource (int s)
+{
+    source = juce::jlimit (0, 3, s);
+    attachControls();
+    repaint();
+}
+
+void ModPage::attachControls()
+{
+    auto& apvts = processor.apvts;
+    const bool group = target < loopTarget;
+    const auto c = colour();
+    sources.onColour = c;
+    sync.onColour = c;
+    shapes.colour = c;
+    if (group)
+    {
+        const juce::String n ("lfo" + juce::String ((source < 2 ? source : 0) + 1));
+        shapes.param = apvts.getParameter (groupId (target, n + "Shape"));
+        rate.attach (apvts, groupId (target, n + "Rate"));
+        division.attach (apvts, groupId (target, n + "Div"));
+        phase.attach (apvts, groupId (target, n + "Phase"));
+        envAttack.attach (apvts, groupId (target, "envAttack"));
+        envHold.attach (apvts, groupId (target, "envHold"));
+        envDecay.attach (apvts, groupId (target, "envDecay"));
+    }
+    for (int i = 0; i < rows.size(); ++i)
+    {
+        const bool shown = group || i < loopRoutes;
+        rows[i]->setVisible (shown);
+        if (shown) rows[i]->attach (group ? target : -1, i);
+        rows[i]->colour = c;
+    }
+    resized();
+}
+
+void ModPage::resized()
+{
+    const bool group = target < loopTarget;
+    const bool lfo = group && source < 2;
+    const bool synced = lfo && choiceIndex (processor, groupId (target, "lfo" + juce::String (source + 1) + "Sync")) == 1;
+    sources.setVisible (group);
+    sources.setBounds (16, 48, 340, 28);
+    shapes.setVisible (lfo);
+    shapes.setBounds (12, 84, 216, 28);
+    sync.setVisible (lfo);
+    sync.setBounds (236, 84, 120, 28);
+    rate.setVisible (lfo && ! synced);
+    division.setVisible (lfo && synced);
+    phase.setVisible (lfo);
+    rate.setBounds (12, 118, Knob::width, Knob::height);
+    division.setBounds (12, 118, Knob::width, Knob::height);
+    phase.setBounds (88, 118, Knob::width, Knob::height);
+    const bool env = group && source == 2;
+    for (auto* k : { &envAttack, &envHold, &envDecay }) k->setVisible (env);
+    envAttack.setBounds (12, 104, Knob::width, Knob::height);
+    envHold.setBounds (88, 104, Knob::width, Knob::height);
+    envDecay.setBounds (164, 104, Knob::width, Knob::height);
+    for (int i = 0; i < rows.size(); ++i) rows[i]->setBounds (372, 74 + i * 26, 325, 24);
+}
+
+void ModPage::update (const Telemetry& t, int, const std::array<int, numGroups>& m)
+{
+    tele = t;
+    members = m;
+    if (target < loopTarget && source < 2)
+    {
+        const bool synced = choiceIndex (processor, groupId (target, "lfo" + juce::String (source + 1) + "Sync")) == 1;
+        if (synced != division.isVisible()) resized();
+        shapes.repaint();
+        sync.repaint();
+    }
+    repaint (previewArea().expanded (4.0f).getSmallestIntegerContainer());
+    if (target == loopTarget) repaint (0, 110, 360, 120);
+}
+
+void ModPage::mouseDown (const juce::MouseEvent& e)
+{
+    for (int t = 0; t <= loopTarget; ++t)
+        if (tabArea (t).contains (e.getPosition())) { showTarget (t); return; }
+}
+
+void ModPage::paintPreview (juce::Graphics& g)
+{
+    const auto box = previewArea();
+    g.setColour (colours::screen);
+    g.fillRoundedRectangle (box, 6.0f);
+    g.setColour (colours::screenEdge);
+    g.drawRoundedRectangle (box.reduced (0.5f), 6.0f, 1.0f);
+    const auto r = box.reduced (8.0f, 10.0f);
+    g.setColour (colours::line);
+    g.fillRect (r.getX(), r.getCentreY(), r.getWidth(), 1.0f);
+    const auto c = colour();
+    juce::Path p;
+    if (source < 2)
+    {
+        const int shape = choiceIndex (processor, groupId (target, "lfo" + juce::String (source + 1) + "Shape"));
+        p = shapeIcon (shape, r);
+        g.setColour (c);
+        g.strokePath (p, juce::PathStrokeType (1.8f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+        // where the LFO is now
+        const float v = tele.groupLfo[target][source];
+        const float y = r.getY() + (0.5f - 0.5f * v) * r.getHeight();
+        g.setColour (colours::text);
+        g.fillEllipse (r.getRight() - 3.0f, y - 3.5f, 7.0f, 7.0f);
+    }
+    else if (source == 2)
+    {
+        const float a = processor.apvts.getRawParameterValue (groupId (target, "envAttack"))->load();
+        const float h = processor.apvts.getRawParameterValue (groupId (target, "envHold"))->load();
+        const float d = processor.apvts.getRawParameterValue (groupId (target, "envDecay"))->load();
+        const float total = juce::jmax (1.0f, a + h + d);
+        auto x = [&] (float ms) { return r.getX() + r.getWidth() * std::sqrt (ms / total); };   // a square-root time axis shows short attacks
+        p.startNewSubPath (r.getX(), r.getBottom());
+        p.lineTo (x (a), r.getY());
+        p.lineTo (x (a + h), r.getY());
+        p.lineTo (r.getRight(), r.getBottom());
+        g.setColour (c);
+        g.strokePath (p, juce::PathStrokeType (1.8f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+    }
+    else
+    {
+        const float v[] { 0.5f, -0.7f, 0.2f, 0.9f, -0.3f, -0.9f, 0.6f, 0.0f };
+        const float w = r.getWidth() / 8.0f;
+        g.setColour (c);
+        for (int i = 0; i < 8; ++i)
+        {
+            const float y = r.getCentreY() - v[i] * r.getHeight() * 0.5f;
+            g.fillRect (juce::Rectangle<float> (r.getX() + i * w + 2.0f, juce::jmin (y, r.getCentreY()), w - 4.0f, std::abs (y - r.getCentreY()) + 1.0f));
+        }
+    }
+}
+
+void ModPage::paint (juce::Graphics& g)
+{
+    using namespace colours;
+    const auto b = getLocalBounds().toFloat();
+    g.setColour (panel);
+    g.fillRoundedRectangle (b, 10.0f);
+    g.setColour (panelEdge);
+    g.drawRoundedRectangle (b.reduced (0.5f), 10.0f, 1.0f);
+
+    // what is being edited: a group or the loop routes
+    for (int t = 0; t <= loopTarget; ++t)
+    {
+        const auto r = tabArea (t).toFloat();
+        const auto c = t < loopTarget ? group (t) : loopMod;
+        const bool on = t == target;
+        if (on) { g.setColour (c); g.fillRoundedRectangle (r, 5.0f); }
+        else
+        {
+            g.setColour (ground);
+            g.fillRoundedRectangle (r, 5.0f);
+            g.setColour (c.withAlpha (0.45f));
+            g.drawRoundedRectangle (r.reduced (0.5f), 5.0f, 1.0f);
+        }
+        g.setColour (on ? dark : c);
+        if (t < loopTarget) { g.setFont (monoBold (13.0f)); g.drawText (groupLetter (t), r, juce::Justification::centred); }
+        else drawCaps (g, tr (lang, "loopTab"), r, juce::Justification::centred, 10.5f);
+    }
+    g.setColour (sub);
+    g.setFont (mono (11.5f));
+    const float infoX = (float) tabArea (loopTarget).getRight() + 14.0f;
+    if (target < loopTarget)
+    {
+        const int n = members[(size_t) target];
+        g.drawText (juce::String (n) + " " + tr (lang, n == 1 ? "sliceInGroup" : "slicesInGroup") + " " + groupLetter (target),
+                    juce::Rectangle<float> (infoX, 12.0f, 690.0f - infoX, 26.0f), juce::Justification::centredLeft);
+    }
+    else g.drawText (tr (lang, "loopRoutesInfo"), juce::Rectangle<float> (infoX, 12.0f, 690.0f - infoX, 26.0f), juce::Justification::centredLeft);
+
+    // routes
+    g.setColour (sub);
+    drawCaps (g, tr (lang, "routes"), { 372.0f, 48.0f, 120.0f, 20.0f }, juce::Justification::centredLeft, 10.5f);
+    g.setColour (faint);
+    g.setFont (sans (12.0f));
+    g.drawText (tr (lang, target < loopTarget ? "routesGroup" : "routesLoop"), juce::Rectangle<float> (440.0f, 48.0f, 257.0f, 20.0f), juce::Justification::centredRight);
+    g.setColour (line);
+    g.fillRect (362.0f, 50.0f, 1.0f, 172.0f);
+
+    if (target < loopTarget)
+    {
+        if (source == 3)
+        {
+            g.setColour (sub);
+            g.setFont (sans (12.5f));
+            g.drawFittedText (tr (lang, "rndMore"), juce::Rectangle<int> (16, 84, 226, 110), juce::Justification::topLeft, 6);
+        }
+        paintPreview (g);
+        g.setColour (sub);
+        g.setFont (sans (12.0f));
+        const char* help[] { "lfoHelp", "lfoHelp", "envHelp", "rndHelp" };
+        g.drawFittedText (tr (lang, help[source]), juce::Rectangle<int> (16, 206, 340, 24), juce::Justification::centredLeft, 2);
+    }
+    else
+    {
+        g.setColour (sub);
+        g.setFont (sans (12.5f));
+        g.drawFittedText (tr (lang, "loopHelp"), juce::Rectangle<int> (16, 48, 336, 56), juce::Justification::topLeft, 3);
+        // the eight LFOs, live
+        const float w = 340.0f / 8.0f;
+        for (int i = 0; i < numGroups * 2; ++i)
+        {
+            const int gr = i / 2, l = i % 2;
+            const auto cell = juce::Rectangle<float> (16.0f + i * w, 112.0f, w - 6.0f, 104.0f);
+            g.setColour (screen);
+            g.fillRoundedRectangle (cell, 5.0f);
+            const auto bar = cell.reduced (8.0f, 8.0f).withTrimmedBottom (16.0f);
+            g.setColour (line);
+            g.fillRect (bar.getX(), bar.getCentreY(), bar.getWidth(), 1.0f);
+            const float v = tele.groupLfo[gr][l];
+            const float y = bar.getCentreY() - v * bar.getHeight() * 0.5f;
+            g.setColour (group (gr));
+            g.fillRect (juce::Rectangle<float> (bar.getX() + 4.0f, juce::jmin (y, bar.getCentreY()), bar.getWidth() - 8.0f, std::abs (y - bar.getCentreY()) + 1.0f));
+            g.setFont (monoBold (10.5f));
+            g.drawText (groupLetter (gr) + juce::String (l + 1), cell.withTrimmedTop (cell.getHeight() - 20.0f), juce::Justification::centred);
+        }
+    }
+}
+
 Content::Content (RebanadaProcessor& p)
     : processor (p),
       slots (p),
@@ -1036,7 +1551,8 @@ Content::Content (RebanadaProcessor& p)
                    [&p] (int i) { setChoice (p, loopId (p.editSlot(), "order"), i); }),
       stereoSwitch ({ "monoShort", "stereoShort" }, false, [this] { return shownStereo ? 1 : 0; },
                     [this] (int i) { const bool st = i == 1; editSlice ([st] (SliceParams& sp) { sp.stereo = st; if (st) sp.out &= ~1; }); refreshSlice(); }),
-      keys (p)
+      keys (p),
+      modPage (p)
 {
     setLookAndFeel (&lnf);
     lang = processor.getLanguage();
@@ -1146,6 +1662,8 @@ Content::Content (RebanadaProcessor& p)
                 else sp.filter = v;
             });
         };
+        const int dest = voiceDestOf (sid, true);
+        k->onModMenu = [this, k, dest, sid] { showModMenu (*k, dest, -1, true, u8 (lang == Lang::es ? sliceSpec (sid).es : sliceSpec (sid).en)); };
         addAndMakeVisible (k);
     }
     for (const char* id : { "attack", "decay", "sustain", "release", "cutoff", "reso", "transpose", "level" })
@@ -1153,14 +1671,43 @@ Content::Content (RebanadaProcessor& p)
         const juce::String sid (id);
         voiceIds.add (sid);
         auto* k = voiceKnobs.add (new Knob (spec (id), sid == "transpose" || sid == "level"));
+        const int vd = voiceDestOf (sid, false), ld = vd < 0 ? loopDestOf (sid) : -1;
+        k->onModMenu = [this, k, vd, ld, sid] { showModMenu (*k, vd, ld, false, u8 (lang == Lang::es ? spec (sid).es : spec (sid).en)); };
         addAndMakeVisible (k);
     }
     for (const char* id : { "chance", "repeat", "lfoRate", "lfoDepth" })
     {
+        const juce::String sid (id);
         motionIds.add (id);
         auto* k = motionKnobs.add (new Knob (spec (id), false));
+        const int ld = loopDestOf (sid);
+        k->onModMenu = [this, k, ld, sid] { showModMenu (*k, -1, ld, false, u8 (lang == Lang::es ? spec (sid).es : spec (sid).en)); };
         addAndMakeVisible (k);
     }
+
+    // modulation
+    for (auto* b : { &tabLoop, &tabMod })
+    {
+        b->setClickingTogglesState (false);
+        b->getProperties().set ("small", true);
+        addAndMakeVisible (b);
+    }
+    tabLoop.onClick = [this] { showPage (0); };
+    tabMod.onClick = [this] { showPage (1); };
+    groupPicker.onPick = [this] (int g) {
+        editSlice ([g] (SliceParams& sp) { sp.group = g; });
+        wave.repaint();
+        if (modPage.getTarget() != ModPage::loopTarget) modPage.showTarget (g);
+        shownGroup = g;
+        repaint (20, 440, 434, 266);
+    };
+    addAndMakeVisible (groupPicker);
+    showModButton.getProperties().set ("onGround", true);
+    showModButton.getProperties().set ("small", true);
+    showModButton.onClick = [this] { modPage.showTarget (sliceGroup()); showPage (1); };
+    addAndMakeVisible (showModButton);
+    addChildComponent (modPage);
+    page = (int) processor.apvts.state.getProperty ("page", 0);
 
     prevButton.getProperties().set ("chevron", 1);
     nextButton.getProperties().set ("chevron", -1);
@@ -1188,7 +1735,119 @@ Content::Content (RebanadaProcessor& p)
 
     setLanguage (lang);
     refreshSlot (true);
+    showPage (page);
     startTimerHz (30);
+}
+
+void Content::showPage (int p)
+{
+    page = juce::jlimit (0, 1, p);
+    processor.apvts.state.setProperty ("page", page, nullptr);
+    const bool sound = page == 0;
+    for (auto* k : voiceKnobs) k->setVisible (sound);
+    for (auto* k : motionKnobs) k->setVisible (sound);
+    for (auto* c : { (juce::Component*) &filterSwitch, (juce::Component*) &orderSwitch, (juce::Component*) &lfoBox }) c->setVisible (sound);
+    modPage.setVisible (! sound);
+    tabLoop.setToggleState (sound, juce::dontSendNotification);
+    tabMod.setToggleState (! sound, juce::dontSendNotification);
+    repaint();
+}
+
+int Content::sliceGroup() const
+{
+    if (! info.loaded() || info.params.empty()) return 0;
+    const int sel = juce::jlimit (0, (int) info.params.size() - 1, shownSelected < 0 ? 0 : shownSelected);
+    return juce::jlimit (0, numGroups - 1, info.params[(size_t) sel].group);
+}
+
+// The arcs on the knobs: how far the routes move each one, and where it is now.
+void Content::updateModulation()
+{
+    const int g = sliceGroup();
+    auto groupMod = [&] (Knob& k, int d) {
+        k.setModulation (processor.groupDepth (g, d), telemetry.groupOffset[g][d], colours::group (g), badgeFor (processor.groupSourceOf (g, d), false));
+    };
+    auto loopMod = [&] (Knob& k, int d) {
+        k.setModulation (processor.loopDepth (d), telemetry.loopOffset[d], colours::loopMod, badgeFor (processor.loopSourceOf (d), true));
+    };
+    for (int i = 0; i < sliceKnobs.size(); ++i) groupMod (*sliceKnobs[i], i);
+    for (int i = 0; i < voiceKnobs.size(); ++i)
+    {
+        const int vd = voiceDestOf (voiceIds[i], false);
+        if (vd >= 0) groupMod (*voiceKnobs[i], vd); else loopMod (*voiceKnobs[i], loopDestOf (voiceIds[i]));
+    }
+    for (int i = 0; i < motionKnobs.size(); ++i) loopMod (*motionKnobs[i], loopDestOf (motionIds[i]));
+
+    std::array<int, numGroups> members {};
+    for (const auto& sp : info.params) ++members[(size_t) juce::jlimit (0, numGroups - 1, sp.group)];
+    if (page == 1) modPage.update (telemetry, g, members);
+}
+
+void Content::showModMenu (Knob& knob, int voiceDest, int loopDest, bool sliceKnob, const juce::String& name)
+{
+    juce::PopupMenu m;
+    m.addSectionHeader (caps (name) + u8 (" · ") + caps (tr (lang, "modWith")));
+    const int g = sliceGroup();
+    if (voiceDest >= 0)
+    {
+        auto addGroup = [&] (juce::PopupMenu& menu, int gr) {
+            for (int s = srcLfo1; s <= srcRnd; ++s)
+                menu.addItem (100 + gr * 10 + s, groupSourceName (s, lang), true, processor.groupHasRoute (gr, voiceDest, s));
+        };
+        m.addSectionHeader (tr (lang, "group") + " " + groupLetter (g) + (sliceKnob ? juce::String() : " (" + tr (lang, "thisSlice") + ")"));
+        addGroup (m, g);
+        if (! sliceKnob)
+            for (int gr = 0; gr < numGroups; ++gr)
+            {
+                if (gr == g) continue;
+                juce::PopupMenu sub;
+                addGroup (sub, gr);
+                m.addSubMenu (tr (lang, "group") + " " + groupLetter (gr), sub, true, nullptr, processor.groupSourceOf (gr, voiceDest) > 0);
+            }
+        m.addSeparator();
+        m.addItem (200 + g, tr (lang, "removeMod") + " (" + groupLetter (g) + ")", processor.groupSourceOf (g, voiceDest) > 0);
+    }
+    else if (loopDest >= 0)
+    {
+        for (int s = 1; s <= numLoopSources; ++s)
+            m.addItem (s, loopSourceName (s, lang), true, processor.loopHasRoute (loopDest, s));
+        m.addSeparator();
+        m.addItem (50, tr (lang, "removeMod"), processor.loopSourceOf (loopDest) > 0);
+    }
+    else return;
+    m.addItem (60, tr (lang, "showModPage"));
+
+    juce::Component::SafePointer<Content> safe (this);
+    m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&knob.slider), [safe, voiceDest, loopDest, g] (int r) {
+        if (safe == nullptr || r == 0) return;
+        auto& p = safe->processor;
+        auto removeOne = [&p] (const std::function<juce::String (int, const char*)>& idOf, int count, int dest, int src) {
+            for (int k = 0; k < count; ++k)
+                if (juce::roundToInt (p.apvts.getRawParameterValue (idOf (k, "Src"))->load()) == src
+                    && juce::roundToInt (p.apvts.getRawParameterValue (idOf (k, "Dest"))->load()) == dest)
+                    p.setParam (idOf (k, "Src"), 0.0f);
+        };
+        if (r > 100 && r < 200)
+        {
+            const int gr = (r - 100) / 10, src = (r - 100) % 10;
+            if (p.groupHasRoute (gr, voiceDest, src))
+                removeOne ([gr] (int k, const char* w) { return groupRouteId (gr, k, w); }, groupRoutes, voiceDest, src);
+            else p.assignGroupMod (gr, voiceDest, src);
+        }
+        else if (r >= 200 && r < 210) p.removeGroupMod (r - 200, voiceDest);
+        else if (r >= 1 && r <= numLoopSources)
+        {
+            if (p.loopHasRoute (loopDest, r)) removeOne ([] (int k, const char* w) { return loopRouteId (k, w); }, loopRoutes, loopDest, r);
+            else p.assignLoopMod (loopDest, r);
+        }
+        else if (r == 50) p.removeLoopMod (loopDest);
+        else if (r == 60)
+        {
+            safe->modPage.showTarget (voiceDest >= 0 ? g : ModPage::loopTarget);
+            safe->showPage (1);
+        }
+        safe->updateModulation();
+    });
 }
 
 Content::~Content()
@@ -1206,6 +1865,7 @@ void Content::setLanguage (Lang l)
     for (auto* k : sliceKnobs) k->setLanguage (l);
     for (auto* k : voiceKnobs) k->setLanguage (l);
     for (auto* k : motionKnobs) k->setLanguage (l);
+    modPage.setLanguage (l);
     for (auto* s : { &modeSwitch, &filterSwitch, &orderSwitch, &stereoSwitch }) s->setLanguage (l);
     midiDragger.setLanguage (l);
     updateTexts();
@@ -1242,6 +1902,11 @@ void Content::updateTexts()
     modeSwitch.setTooltip (lang == Lang::es ? u8 ("Sync: el loop sigue el tempo del anfitrión. Libre: el loop va a su propio tiempo")
                                             : "Sync: the loop follows the host tempo. Free: the loop runs in its own time");
     orderSwitch.setTooltip (lang == Lang::es ? u8 ("En qué orden toca las rebanadas el loop") : "The order in which the loop plays its slices");
+    tabLoop.setButtonText (caps (tr (lang, "loopTab") + " " + juce::String (processor.editSlot() + 1) + u8 (" · ") + tr (lang, "tabSound")));
+    tabMod.setButtonText (caps (tr (lang, "tabMod")));
+    showModButton.setButtonText (tr (lang, "showMod") + u8 ("  ›"));
+    groupPicker.setTooltip (tr (lang, "modGroupTip"));
+    showModButton.setTooltip (tr (lang, "showModTip"));
 }
 
 void Content::attachLoop (int slot)
@@ -1276,6 +1941,7 @@ void Content::refreshSlot (bool force)
                                 (juce::Component*) &stereoSwitch })
         c->setEnabled (loaded);
     for (auto* k : sliceKnobs) k->setEnabled (loaded);
+    groupPicker.setEnabled (loaded);
     barsDown.setVisible (loaded);
     barsUp.setVisible (loaded);
     refreshSlice();
@@ -1294,11 +1960,18 @@ void Content::refreshSlice()
         sliceKnobs[i]->slider.setValue (values[i], juce::dontSendNotification);
         sliceKnobs[i]->repaint();
     }
+    groupPicker.value = juce::jlimit (0, numGroups - 1, sp.group);
+    groupPicker.repaint();
     reverseButton.setToggleState (sp.reverse, juce::dontSendNotification);
     muteButton.setToggleState (sp.mute, juce::dontSendNotification);
     fillOutputs (sp);
     wave.repaint();
     repaint (20, 440, 434, 50);
+    if (sp.group != shownGroup)
+    {
+        shownGroup = sp.group;
+        if (modPage.getTarget() != ModPage::loopTarget) modPage.showTarget (shownGroup);
+    }
 }
 
 // The channel menu lists pairs (1–2 … 63–64) or single channels (1 … 64);
@@ -1421,6 +2094,7 @@ void Content::timerCallback()
     modeSwitch.repaint();
     filterSwitch.repaint();
     orderSwitch.repaint();
+    updateModulation();
 }
 
 //==============================================================================
@@ -1481,10 +2155,11 @@ void Content::paint (juce::Graphics& g)
     }
 
     // panels
-    const float panelY = 440.0f, panelH = 236.0f;
-    const juce::Rectangle<float> panels[] { { 20.0f, panelY, 433.0f, panelH }, { 467.0f, panelY, 350.0f, panelH }, { 831.0f, panelY, 349.0f, panelH } };
-    for (const auto& r : panels)
+    const float panelY = 470.0f, panelH = 236.0f;
+    const juce::Rectangle<float> panels[] { { 20.0f, 440.0f, 433.0f, 266.0f }, { 467.0f, panelY, 350.0f, panelH }, { 831.0f, panelY, 349.0f, panelH } };
+    for (int i = 0; i < (page == 0 ? 3 : 1); ++i)
     {
+        const auto& r = panels[i];
         g.setColour (panel);
         g.fillRoundedRectangle (r, 10.0f);
         g.setColour (panelEdge);
@@ -1515,9 +2190,13 @@ void Content::paint (juce::Graphics& g)
         juce::ignoreUnused (s);
         g.setColour (sub);
         drawCaps (g, tr (lang, "out"), { 232.0f, 598.0f, 48.0f, 32.0f }, juce::Justification::centredRight, 10.0f);
-        drawCaps (g, tr (lang, "voice"), { 483.0f, 452.0f, 320.0f, 16.0f }, juce::Justification::centredLeft, 10.5f);
-        drawCaps (g, tr (lang, "motion"), { 847.0f, 452.0f, 320.0f, 16.0f }, juce::Justification::centredLeft, 10.5f);
-        drawCaps (g, tr (lang, "lfoTo") + u8 (" →"), { 847.0f, 628.0f, 60.0f, 30.0f }, juce::Justification::centredLeft, 10.5f);
+        drawCaps (g, tr (lang, "modGroup"), { 36.0f, 652.0f, 104.0f, 30.0f }, juce::Justification::centredLeft, 10.0f);
+        if (page == 0)
+        {
+            drawCaps (g, tr (lang, "voice"), { 483.0f, 482.0f, 320.0f, 16.0f }, juce::Justification::centredLeft, 10.5f);
+            drawCaps (g, tr (lang, "motion"), { 847.0f, 482.0f, 320.0f, 16.0f }, juce::Justification::centredLeft, 10.5f);
+            drawCaps (g, tr (lang, "lfoTo") + u8 (" →"), { 847.0f, 658.0f, 60.0f, 30.0f }, juce::Justification::centredLeft, 10.5f);
+        }
     }
 }
 
@@ -1555,16 +2234,21 @@ void Content::resized()
     outBox.setBounds (356, 599, 81, 32);
 
     // amp envelope and filter
-    for (int i = 0; i < 4; ++i) voiceKnobs[i]->setBounds (474 + i * 80, 478, Knob::width, Knob::height);
-    filterSwitch.setBounds (483, 576, 46, 78);
-    for (int i = 4; i < 8; ++i) voiceKnobs[i]->setBounds (534 + (i - 4) * 66, 572, Knob::width, Knob::height);
+    groupPicker.setBounds (140, 652, 168, 30);
+    showModButton.setBounds (318, 652, 119, 30);
 
-    // order and motion
-    orderSwitch.setBounds (847, 476, 317, 34);
-    for (int i = 0; i < motionKnobs.size(); ++i) motionKnobs[i]->setBounds (842 + i * 80, 524, Knob::width, Knob::height);
-    lfoBox.setBounds (906, 628, 150, 30);
+    // the loop's sound and order, or the modulation
+    tabLoop.setBounds (467, 440, 230, 26);
+    tabMod.setBounds (703, 440, 150, 26);
+    for (int i = 0; i < 4; ++i) voiceKnobs[i]->setBounds (474 + i * 80, 508, Knob::width, Knob::height);
+    filterSwitch.setBounds (483, 606, 46, 78);
+    for (int i = 4; i < 8; ++i) voiceKnobs[i]->setBounds (534 + (i - 4) * 66, 602, Knob::width, Knob::height);
+    orderSwitch.setBounds (847, 506, 317, 34);
+    for (int i = 0; i < motionKnobs.size(); ++i) motionKnobs[i]->setBounds (842 + i * 80, 554, Knob::width, Knob::height);
+    lfoBox.setBounds (906, 658, 150, 30);
+    modPage.setBounds (467, 470, 713, 236);
 
-    keys.setBounds (20, 690, 1160, 64);
+    keys.setBounds (20, 720, 1160, 64);
 }
 
 } // namespace rebanada::rack

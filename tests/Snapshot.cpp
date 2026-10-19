@@ -64,8 +64,10 @@ int main (int argc, char** argv)
         juce::String error;
         const bool loaded = a.loadFile (3, writeTestLoop ("rebanada-state.wav", 0), error);
         auto sp = a.getSlice (3, 2);
-        sp.pitch = 5.0f; sp.reverse = true; sp.out = 7; sp.stereo = false;
+        sp.pitch = 5.0f; sp.reverse = true; sp.out = 7; sp.stereo = false; sp.group = 2;
         a.setSlice (3, 2, sp);
+        a.assignGroupMod (2, rebanada::vdCutoff, rebanada::srcEnv);
+        a.assignLoopMod (rebanada::ldRepeat, 1 + 3 * 2);   // D LFO 1
         a.setBars (3, 4);
         const int slices = a.slotInfo (3).numSlices;
         juce::MemoryBlock block;
@@ -76,9 +78,11 @@ int main (int argc, char** argv)
         const auto info = b.slotInfo (3);
         const auto back = b.getSlice (3, 2);
         const bool ok = loaded && info.loaded() && info.numSlices == slices && info.bars == 4
-                        && back.pitch == 5.0f && back.reverse && back.out == 7 && ! back.stereo;
-        std::printf ("%s  session restored: %d slices, %d bars, slice 3 pitch %.1f, mono channel %d\n", ok ? "ok  " : "FAIL",
-                     info.numSlices, info.bars, (double) back.pitch, back.out + 1);
+                        && back.pitch == 5.0f && back.reverse && back.out == 7 && ! back.stereo && back.group == 2
+                        && b.groupSourceOf (2, rebanada::vdCutoff) == rebanada::srcEnv && b.loopSourceOf (rebanada::ldRepeat) == 7
+                        && std::abs (b.groupDepth (2, rebanada::vdCutoff) - 0.3f) < 0.01f;
+        std::printf ("%s  session restored: %d slices, %d bars, slice 3 pitch %.1f, mono channel %d, group %c, routes kept\n", ok ? "ok  " : "FAIL",
+                     info.numSlices, info.bars, (double) back.pitch, back.out + 1, (char) ('A' + back.group));
 
         // a session saved by 0.1: shared settings go to every loop, output pairs become channels
         juce::XmlElement old ("REBANADA");
@@ -163,6 +167,17 @@ int main (int argc, char** argv)
         check (f3 && p3[0] > 0.2f, "C2 plays slice 1 (peak " + juce::String (p3[0], 2) + ")");
         auto [f4, p4] = play (60, 37);
         check (f4 && p4[2] > 0.05f && p4[0] < 0.02f, "C#2 plays slice 2, routed to Out 3-4 only");
+
+        // modulation: slice 2 joins group B, whose LFO 1 (a slow square, now at +1) pulls its level down
+        sp.group = 1; proc.setSlice (0, 1, sp);
+        proc.setParam ("gB_lfo1Shape", 3.0f);
+        proc.setParam ("gB_lfo1Rate", 0.01f);
+        proc.assignGroupMod (1, rebanada::vdLevel, rebanada::srcLfo1);
+        proc.setParam ("gB_r1Amt", -100.0f);
+        auto [f5, p5] = play (60, 37);
+        check (f5 && p5[2] < 0.3f * p4[2], "a group B route turns slice 2 down (peak " + juce::String (p5[2], 3) + ")");
+        auto [f6, p6] = play (60, 36);
+        check (f6 && p6[0] > 0.2f, "slice 1, in group A, is untouched");
         std::printf (failures == 0 ? "\nall playback tests passed\n" : "\n%d playback tests failed\n", failures);
         return failures == 0 ? 0 : 1;
     }
@@ -170,9 +185,10 @@ int main (int argc, char** argv)
     const juce::String out = argc > 1 ? argv[1] : "rebanada.png";
     const bool spanish = argc > 2 && juce::String (argv[2]) == "es";
     const int width  = argc > 3 ? juce::String (argv[3]).getIntValue() : 1200;
-    const int height = argc > 4 ? juce::String (argv[4]).getIntValue() : 780;
+    const int height = argc > 4 ? juce::String (argv[4]).getIntValue() : 810;
     const bool empty = argc > 5 && juce::String (argv[5]) == "empty";
     const bool zoom = argc > 5 && juce::String (argv[5]) == "zoom";
+    const juce::String modView = argc > 5 && juce::String (argv[5]).startsWith ("mod") ? juce::String (argv[5]) : juce::String();
     const int outs = argc > 6 ? juce::String (argv[6]).getIntValue() : 2;
 
     auto proc = std::make_unique<RebanadaProcessor>();
@@ -191,6 +207,23 @@ int main (int argc, char** argv)
         sp = proc->getSlice (0, 3);
         sp.pitch = 3.0f; sp.pan = -0.18f; sp.decay = 340.0f; sp.filter = -0.8f;
         proc->setSlice (0, 3, sp);
+        // some modulation, so the arcs and the groups show
+        for (int i : { 1, 5, 9 }) { auto q = proc->getSlice (0, i); q.group = 1; proc->setSlice (0, i, q); }
+        for (int i : { 2, 6 }) { auto q = proc->getSlice (0, i); q.group = 2; proc->setSlice (0, i, q); }
+        { auto q = proc->getSlice (0, 7); q.group = 3; proc->setSlice (0, 7, q); }
+        proc->assignGroupMod (0, rebanada::vdPitch, rebanada::srcLfo1);
+        proc->assignGroupMod (0, rebanada::vdCutoff, rebanada::srcEnv);
+        proc->assignGroupMod (0, rebanada::vdPan, rebanada::srcRnd);
+        proc->assignGroupMod (0, rebanada::vdAttack, rebanada::srcLfo2);
+        proc->setParam ("gA_r1Amt", 20.0f);
+        proc->setParam ("gA_r2Amt", -45.0f);
+        proc->setParam ("gA_r3Amt", 80.0f);
+        proc->setParam ("gA_lfo1Shape", 1.0f);
+        proc->setParam ("gA_lfo2Sync", 1.0f);
+        proc->assignLoopMod (rebanada::ldRepeat, 1);
+        proc->assignLoopMod (rebanada::ldChance, 4);
+        proc->setParam ("lr1Amt", 55.0f);
+        proc->setParam ("lr2Amt", -35.0f);
         proc->requestSlot (0);
     }
 
@@ -205,6 +238,21 @@ int main (int argc, char** argv)
             return nullptr;
         };
         if (auto* w = find (editor.get())) w->zoomAround (44100.0 * 1.1, 0.3);
+    }
+    if (modView.isNotEmpty())
+    {
+        std::function<rebanada::rack::Content* (juce::Component*)> find = [&] (juce::Component* c) -> rebanada::rack::Content* {
+            if (auto* w = dynamic_cast<rebanada::rack::Content*> (c)) return w;
+            for (auto* child : c->getChildren()) if (auto* w = find (child)) return w;
+            return nullptr;
+        };
+        if (auto* c = find (editor.get()))
+        {
+            c->showPage (1);
+            if (modView == "modloop") c->showModTarget (4);
+            if (modView == "modenv") c->showModSource (2);
+            if (modView == "modsync") c->showModSource (1);
+        }
     }
     for (int i = 0; i < 10; ++i)
     {

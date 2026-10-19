@@ -2,7 +2,7 @@
 
 **Sampler de rebanadas** para VST3, CLAP, AU y como aplicación independiente, en macOS y Windows, en el espíritu del Dr. OctoRex de Reason.
 
-Rebanada corta un archivo de audio en rebanadas (detectando sus ataques o con una grilla), las toca en orden siguiendo el tempo del anfitrión o en el tiempo propio del loop, y deja tocar cada rebanada desde una nota MIDI. Cada rebanada tiene su altura, nivel, paneo, caída, filtro, sentido y canal de salida (hasta 64). Guarda hasta ocho loops, cada uno con su propia envolvente, filtro, orden y LFO, y cambia entre ellos en el pulso, en el compás o al final del loop.
+Rebanada corta un archivo de audio en rebanadas (detectando sus ataques o con una grilla), las toca en orden siguiendo el tempo del anfitrión o en el tiempo propio del loop, y deja tocar cada rebanada desde una nota MIDI. Cada rebanada tiene su altura, nivel, paneo, caída, filtro, sentido y canal de salida (hasta 64). Guarda hasta ocho loops, cada uno con su propia envolvente, filtro, orden y LFO, y cambia entre ellos en el pulso, en el compás o al final del loop. Cuatro grupos de modulación, con dos LFO, una envolvente y un valor al azar cada uno, mueven casi todo: el sonido de las rebanadas y la manera en que toca el loop.
 
 ![Interfaz de Rebanada](docs/captura.png)
 
@@ -12,6 +12,16 @@ Rebanada corta un archivo de audio en rebanadas (detectando sus ataques o con un
 2. Descomprimilo y seguí las instrucciones del archivo `LEEME.txt` que viene adentro. Hay un instalador para cada sistema.
 
 Las versiones de prueba, que todavía no se publicaron como Release, están en la pestaña **[Actions](../../actions)**: abrí la última compilación exitosa y bajá el paquete desde *Artifacts* (hace falta una cuenta de GitHub).
+
+## Novedades de la 0.3
+
+- **Grupos de modulación A, B, C y D**: cada rebanada pertenece a un grupo (*Mod group*, debajo de sus perillas) y la etiqueta de la rebanada en la forma de onda toma el color de su grupo.
+- Cada grupo tiene **dos LFO** (seis formas, libres en Hz o sincronizados al tempo, con fase), una **ENV** que vuelve a empezar con cada rebanada y un **RND**, un valor al azar nuevo para cada rebanada.
+- **Seis rutas por grupo** hacia la altura, el fino, el nivel, el paneo, la caída y el filtro de la rebanada, y hacia el ataque, la caída, el sostén, la extinción, el corte y la resonancia del loop. Los tiempos de la envolvente se leen cuando empieza cada rebanada; lo demás se mueve todo el tiempo.
+- **Cuatro rutas de loop**: los LFO de los grupos mueven *Repeat*, *Chance*, *Rate*, *Transpose*, el nivel, y la velocidad y profundidad del LFO del loop. *Repeat*, *Chance* y *Rate* se leen en cada paso.
+- **Clic derecho en una perilla** → *Modular con…*: crea la ruta sin ir a la página. Un arco del color del grupo muestra cuánto se mueve, y un punto dónde está ahora.
+- Pestañas **Loop · sonido y orden** y **Modulación**. Todos los ajustes de modulación son parámetros del DAW («A LFO 1 rate», «B Route 2 amount», «Loop route 1 source»…), cada uno con su propia automatización.
+- Las sesiones de la 0.2 se abren igual: todas sus rebanadas quedan en el grupo A, sin rutas.
 
 ## Novedades de la 0.2
 
@@ -48,6 +58,7 @@ Las versiones de prueba, que todavía no se publicaron como Release, están en l
 | Reverse | La rebanada suena al revés. |
 | Mute | La rebanada no suena (ni en el loop ni con su nota). |
 | Out | **M**: un canal (1 a 64). **ST**: un par de canales (1–2 a 63–64), con su paneo. |
+| Mod group | El grupo de modulación de la rebanada: A, B, C o D. |
 
 ### Generales (automatizables)
 
@@ -70,6 +81,16 @@ Las versiones de prueba, que todavía no se publicaron como Release, están en l
 | Orden | Forward / Random / Weighted | En orden, al azar, o en orden con una proporción (*Chance*) de pasos que tocan otra rebanada. |
 | | Repeat | Probabilidad de que un paso repita la rebanada anterior. |
 | Movimiento | LFO rate, LFO depth, LFO → | LFO hacia el corte, la altura, el paneo o el nivel. |
+
+### Modulación (automatizable, de «A» a «D» y «Loop route»)
+
+| Fuente o ruta | Parámetros | Qué hace |
+|---|---|---|
+| LFO 1, LFO 2 | Shape, Sync, Rate, Division, Phase | Oscilador lento de cada grupo: seno, triángulo, sierra, cuadrada, escalones o azar suave; libre (0,01 a 20 Hz) o de 4 compases a 1/32, con tresillos. |
+| ENV | Attack, Hold, Decay | Envolvente que vuelve a empezar con cada rebanada del grupo. |
+| RND | — | Un valor al azar, de −1 a +1, para cada rebanada. |
+| Route 1 … 6 | Source, Target, Amount | Fuente → destino del sonido de las rebanadas del grupo. *Amount* es la proporción del recorrido de la perilla (±100 %). |
+| Loop route 1 … 4 | Source, Target, Amount | Un LFO de cualquier grupo → cómo toca el loop. |
 
 ## Salidas separadas
 

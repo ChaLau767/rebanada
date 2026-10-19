@@ -36,6 +36,13 @@ Salidas separadas (hasta 64 canales)
   Cada loop tiene además sus propios ajustes, automatizables por separado
   (L1 … L8). Rueda del mouse sobre la forma de onda: zoom.
 
+Modulación
+  Cada rebanada pertenece a un grupo (A, B, C o D, debajo de sus perillas).
+  En la pestaña «Modulación», cada grupo tiene dos LFO, una envolvente (ENV)
+  y un valor al azar (RND) para mover el sonido de sus rebanadas, y los LFO
+  pueden mover también cómo toca el loop (Repeat, Chance, Rate…).
+  Atajo: clic derecho en una perilla > «Modular con».
+
 La aplicación independiente toca el loop con su propio tempo
 (arrastrá el número de BPM para cambiarlo) y acepta un teclado MIDI:
 elegilo en «Options».

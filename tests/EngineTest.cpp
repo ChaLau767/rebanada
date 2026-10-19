@@ -240,6 +240,64 @@ int main()
         check (r.finite, "200 notes at once stay finite");
     }
 
+    // modulation groups: an LFO of group B pulls the level of its slices down; group A is untouched
+    {
+        for (auto& sp : slot.slices) sp = SliceParams {};
+        slot.slices[1].group = 1;
+        Params q;
+        auto& gb = q.groups[1];
+        gb.shape[0] = modlib::square; gb.rate[0] = 0.01f;            // stays at +1 for 50 s
+        gb.routes[0] = { srcLfo1, vdLevel, -1.0f };
+        e.reset(); e.requestSlot (0); render (e, q, stopped, 1);
+        const float a = render (e, q, stopped, 20, 512, { { Event::noteOn, 0, sliceBaseNote + 0, 1.0f } }).peak;
+        e.reset(); render (e, q, stopped, 1);
+        const float b = render (e, q, stopped, 20, 512, { { Event::noteOn, 0, sliceBaseNote + 1, 1.0f } }).peak;
+        check (a > 0.3f && b < 0.05f, "a group LFO moves only the slices of its group");
+
+        // times are read when the slice starts: a long attack keeps the start quiet
+        gb.routes[0] = { srcLfo1, vdAttack, 1.0f };
+        e.reset(); render (e, q, stopped, 1);
+        const float slow = render (e, q, stopped, 2, 512, { { Event::noteOn, 0, sliceBaseNote + 1, 1.0f } }).peak;
+        gb.routes[0] = {};
+        e.reset(); render (e, q, stopped, 1);
+        const float fast = render (e, q, stopped, 2, 512, { { Event::noteOn, 0, sliceBaseNote + 1, 1.0f } }).peak;
+        check (slow < 0.3f * fast && fast > 0.3f, "a route to Attack lengthens the attack");
+
+        // ENV and RND on many destinations stay finite and audible
+        auto& ga = q.groups[0];
+        ga.routes[0] = { srcEnv, vdCutoff, -0.7f };
+        ga.routes[1] = { srcRnd, vdPitch, 0.3f };
+        ga.routes[2] = { srcRnd, vdPan, 1.0f };
+        ga.routes[3] = { srcLfo2, vdReso, 0.8f };
+        ga.routes[4] = { srcEnv, vdSliceDecay, -1.0f };
+        ga.routes[5] = { srcLfo1, vdFilter, 0.5f };
+        ga.shape[1] = modlib::smooth; ga.sync[1] = true; ga.division[1] = 6;
+        e.reset();
+        r = render (e, q, host, 200);
+        check (r.finite && r.peak > 0.05f && r.peak < 4.0f, "ENV, RND and synced LFOs stay finite");
+
+        // loop routes: an LFO pulls the loop level down
+        Params lq;
+        lq.groups[2].shape[1] = modlib::square; lq.groups[2].rate[1] = 0.01f;
+        lq.loopRoute[0] = { 1 + 2 * 2 + 1, ldLevel, -1.0f };   // group C, LFO 2
+        e.reset();
+        r = render (e, lq, host, 100);
+        Telemetry t; e.snapshot (t);
+        check (r.peak < 0.05f && std::abs (t.loopOffset[ldLevel] + 1.0f) < 1.0e-4f, "a loop route moves the loop's level");
+        for (auto& sp : slot.slices) sp = SliceParams {};
+    }
+
+    // long host blocks are cut into pieces: playback and late notes still work
+    {
+        e.reset();
+        Clock c = host; c.ppq = 0.0;
+        r = render (e, p, c, 30, 4096);
+        check (r.finite && r.blocksWithSound > 20, "4096-sample blocks play the loop");
+        e.reset();
+        r = render (e, p, stopped, 1, 4096, { { Event::noteOn, 3500, sliceBaseNote, 1.0f } });
+        check (r.peak > 0.3f, "a note late in a long block still sounds");
+    }
+
     std::printf (failures == 0 ? "\nall tests passed\n" : "\n%d tests failed\n", failures);
     return failures == 0 ? 0 : 1;
 }

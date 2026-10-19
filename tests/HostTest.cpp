@@ -95,6 +95,7 @@ int main (int argc, char** argv)
         check (plugin->setBusesLayout (layout) && plugin->getTotalNumOutputChannels() == 2, "back to stereo");
     }
     check (plugin->getParameters().size() >= 4 + 8 * 17, "every loop has its own parameters (" + juce::String (plugin->getParameters().size()) + ")");
+    check (plugin->getParameters().size() >= 4 + 8 * 17 + 4 * 31 + 4 * 3, "the modulation groups and loop routes are host parameters");
 
     PlayHead head;
     plugin->setPlayHead (&head);

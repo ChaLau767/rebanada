@@ -21,12 +21,13 @@ namespace
             rows.add (juce::String (s.starts[(size_t) i]) + " " + juce::String (p.pitch, 2) + " " + juce::String (p.fine, 1) + " "
                       + juce::String (p.level, 2) + " " + juce::String (p.pan, 3) + " " + juce::String (p.decay, 1) + " "
                       + juce::String (p.filter, 2) + " " + (p.reverse ? "1" : "0") + " " + (p.mute ? "1" : "0") + " " + juce::String (p.out)
-                      + " " + (p.stereo ? "1" : "0"));
+                      + " " + (p.stereo ? "1" : "0") + " " + juce::String (p.group));
         }
         return rows.joinIntoString (";");
     }
 
-    // format 1 (Rebanada 0.1): the output was a stereo pair; format 2: a channel, mono or stereo
+    // format 1 (Rebanada 0.1): the output was a stereo pair; format 2: a channel, mono or stereo;
+    // format 3 (0.3): also the modulation group
     void decodeSlices (Slot& s, const juce::String& text, int format)
     {
         auto rows = juce::StringArray::fromTokens (text, ";", "");
@@ -51,6 +52,7 @@ namespace
             p.mute = f[8].getIntValue() != 0;
             if (format < 2) { p.out = juce::jlimit (0, 7, f[9].getIntValue()) * 2; p.stereo = true; }
             else { p.out = juce::jlimit (0, maxOutputs - 1, f[9].getIntValue()); p.stereo = f.size() < 11 || f[10].getIntValue() != 0; }
+            p.group = format >= 3 && f.size() > 11 ? juce::jlimit (0, numGroups - 1, f[11].getIntValue()) : 0;
             ++n;
         }
         if (n > 0) s.numSlices = n;
@@ -77,6 +79,22 @@ RebanadaProcessor::RebanadaProcessor()
         L = { q ("chance"), q ("repeat"), q ("lfoRate"), q ("lfoDepth"), q ("attack"), q ("decay"), q ("sustain"), q ("release"),
               q ("cutoff"), q ("reso"), q ("transpose"), q ("rate"), q ("level"), q ("mode"), q ("order"), q ("lfoDest"), q ("filterType") };
     }
+    for (int g = 0; g < numGroups; ++g)
+    {
+        auto& G = refs.groups[(size_t) g];
+        auto q = [&] (const juce::String& base) { return r (groupId (g, base)); };
+        for (int l = 0; l < 2; ++l)
+        {
+            const juce::String n ("lfo" + juce::String (l + 1));
+            G.shape[l] = q (n + "Shape"); G.sync[l] = q (n + "Sync"); G.div[l] = q (n + "Div");
+            G.rate[l] = q (n + "Rate"); G.phase[l] = q (n + "Phase");
+        }
+        G.envAttack = q ("envAttack"); G.envHold = q ("envHold"); G.envDecay = q ("envDecay");
+        for (int k = 0; k < groupRoutes; ++k)
+            G.routes[(size_t) k] = { r (groupRouteId (g, k, "Src")), r (groupRouteId (g, k, "Dest")), r (groupRouteId (g, k, "Amt")) };
+    }
+    for (int k = 0; k < loopRoutes; ++k)
+        refs.loopRoutes[(size_t) k] = { r (loopRouteId (k, "Src")), r (loopRouteId (k, "Dest")), r (loopRouteId (k, "Amt")) };
     if (! apvts.state.hasProperty ("lang")) apvts.state.setProperty ("lang", 0, nullptr);
 }
 
@@ -114,7 +132,137 @@ Params RebanadaProcessor::readParams() const noexcept
         o.transpose = L.transpose->load(); o.rate = L.rate->load();         o.level = L.level->load();
         o.mode = (int) L.mode->load();   o.order = (int) L.order->load();
     }
+    auto route = [] (const RouteRefs& R) {
+        return ModRoute { juce::roundToInt (R.src->load()), juce::roundToInt (R.dest->load()), R.amt->load() * 0.01f };
+    };
+    for (int g = 0; g < numGroups; ++g)
+    {
+        const auto& G = refs.groups[(size_t) g];
+        auto& o = p.groups[(size_t) g];
+        for (int l = 0; l < 2; ++l)
+        {
+            o.shape[l] = juce::roundToInt (G.shape[l]->load());
+            o.sync[l] = G.sync[l]->load() > 0.5f;
+            o.division[l] = juce::roundToInt (G.div[l]->load());
+            o.rate[l] = G.rate[l]->load();
+            o.phase[l] = G.phase[l]->load() / 360.0f;
+        }
+        o.envAttack = G.envAttack->load(); o.envHold = G.envHold->load(); o.envDecay = G.envDecay->load();
+        for (int k = 0; k < groupRoutes; ++k) o.routes[k] = route (G.routes[(size_t) k]);
+    }
+    for (int k = 0; k < loopRoutes; ++k) p.loopRoute[k] = route (refs.loopRoutes[(size_t) k]);
     return p;
+}
+
+//==============================================================================
+void RebanadaProcessor::setParam (const juce::String& id, float value)
+{
+    if (auto* param = apvts.getParameter (id))
+    {
+        param->beginChangeGesture();
+        param->setValueNotifyingHost (param->convertTo0to1 (value));
+        param->endChangeGesture();
+    }
+}
+
+bool RebanadaProcessor::groupHasRoute (int g, int dest, int source) const
+{
+    if (! juce::isPositiveAndBelow (g, numGroups)) return false;
+    for (const auto& R : refs.groups[(size_t) g].routes)
+        if (juce::roundToInt (R.src->load()) == source && juce::roundToInt (R.dest->load()) == dest) return true;
+    return false;
+}
+
+bool RebanadaProcessor::loopHasRoute (int dest, int source) const
+{
+    for (const auto& R : refs.loopRoutes)
+        if (juce::roundToInt (R.src->load()) == source && juce::roundToInt (R.dest->load()) == dest) return true;
+    return false;
+}
+
+int RebanadaProcessor::groupSourceOf (int g, int dest) const
+{
+    if (! juce::isPositiveAndBelow (g, numGroups)) return 0;
+    for (const auto& R : refs.groups[(size_t) g].routes)
+    {
+        const int s = juce::roundToInt (R.src->load());
+        if (s > 0 && juce::roundToInt (R.dest->load()) == dest) return s;
+    }
+    return 0;
+}
+
+float RebanadaProcessor::groupDepth (int g, int dest) const
+{
+    if (! juce::isPositiveAndBelow (g, numGroups)) return 0.0f;
+    float d = 0.0f;
+    for (const auto& R : refs.groups[(size_t) g].routes)
+        if (juce::roundToInt (R.src->load()) > 0 && juce::roundToInt (R.dest->load()) == dest) d += std::abs (R.amt->load()) * 0.01f;
+    return juce::jmin (1.0f, d);
+}
+
+void RebanadaProcessor::assignGroupMod (int g, int dest, int source)
+{
+    if (! juce::isPositiveAndBelow (g, numGroups) || dest < 0 || source <= 0) return;
+    const auto& G = refs.groups[(size_t) g];
+    for (int k = 0; k < groupRoutes; ++k)   // already there
+        if (juce::roundToInt (G.routes[(size_t) k].src->load()) == source && juce::roundToInt (G.routes[(size_t) k].dest->load()) == dest) return;
+    for (int k = 0; k < groupRoutes; ++k)
+        if (juce::roundToInt (G.routes[(size_t) k].src->load()) == 0)
+        {
+            setParam (groupRouteId (g, k, "Dest"), (float) dest);
+            setParam (groupRouteId (g, k, "Src"), (float) source);
+            if (std::abs (G.routes[(size_t) k].amt->load()) < 0.5f) setParam (groupRouteId (g, k, "Amt"), 30.0f);
+            return;
+        }
+}
+
+void RebanadaProcessor::removeGroupMod (int g, int dest)
+{
+    if (! juce::isPositiveAndBelow (g, numGroups)) return;
+    const auto& G = refs.groups[(size_t) g];
+    for (int k = 0; k < groupRoutes; ++k)
+        if (juce::roundToInt (G.routes[(size_t) k].dest->load()) == dest && juce::roundToInt (G.routes[(size_t) k].src->load()) > 0)
+            setParam (groupRouteId (g, k, "Src"), 0.0f);
+}
+
+int RebanadaProcessor::loopSourceOf (int dest) const
+{
+    for (const auto& R : refs.loopRoutes)
+    {
+        const int s = juce::roundToInt (R.src->load());
+        if (s > 0 && juce::roundToInt (R.dest->load()) == dest) return s;
+    }
+    return 0;
+}
+
+float RebanadaProcessor::loopDepth (int dest) const
+{
+    float d = 0.0f;
+    for (const auto& R : refs.loopRoutes)
+        if (juce::roundToInt (R.src->load()) > 0 && juce::roundToInt (R.dest->load()) == dest) d += std::abs (R.amt->load()) * 0.01f;
+    return juce::jmin (1.0f, d);
+}
+
+void RebanadaProcessor::assignLoopMod (int dest, int source)
+{
+    if (dest < 0 || source <= 0) return;
+    for (int k = 0; k < loopRoutes; ++k)
+        if (juce::roundToInt (refs.loopRoutes[(size_t) k].src->load()) == source && juce::roundToInt (refs.loopRoutes[(size_t) k].dest->load()) == dest) return;
+    for (int k = 0; k < loopRoutes; ++k)
+        if (juce::roundToInt (refs.loopRoutes[(size_t) k].src->load()) == 0)
+        {
+            setParam (loopRouteId (k, "Dest"), (float) dest);
+            setParam (loopRouteId (k, "Src"), (float) source);
+            if (std::abs (refs.loopRoutes[(size_t) k].amt->load()) < 0.5f) setParam (loopRouteId (k, "Amt"), 30.0f);
+            return;
+        }
+}
+
+void RebanadaProcessor::removeLoopMod (int dest)
+{
+    for (int k = 0; k < loopRoutes; ++k)
+        if (juce::roundToInt (refs.loopRoutes[(size_t) k].dest->load()) == dest && juce::roundToInt (refs.loopRoutes[(size_t) k].src->load()) > 0)
+            setParam (loopRouteId (k, "Src"), 0.0f);
 }
 
 void RebanadaProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
@@ -479,7 +627,7 @@ juce::ValueTree RebanadaProcessor::saveSlots() const
         const auto& s = engine.slots[(size_t) i];
         t.setProperty ("bars", s.bars, nullptr);
         t.setProperty ("slices", encodeSlices (s), nullptr);
-        t.setProperty ("fmt", 2, nullptr);
+        t.setProperty ("fmt", 3, nullptr);
         slots.appendChild (t, nullptr);
     }
     return slots;

@@ -82,6 +82,91 @@ inline const std::vector<FloatSpec>& sliceSpecs()
     return specs;
 }
 
+//==============================================================================
+// Modulation (Rebanada 0.3): four groups (A … D), each with two LFOs, an envelope (ENV)
+// and a random value per slice (RND), sent through six routes to the sound of its slices.
+// Four loop routes send the groups' LFOs to how the loop plays. All are host parameters.
+inline const std::vector<FloatSpec>& modSpecs()
+{
+    using S = FloatSpec;
+    static const std::vector<FloatSpec> specs {
+        { "lfo1Rate",  "LFO 1 rate",  "Vel. LFO 1",  0.01f, 20.0f,   0.5f,  "Hz",  2, S::logarithmic, false, "Speed of the free LFO", "Velocidad del LFO libre" },
+        { "lfo1Phase", "LFO 1 phase", "Fase LFO 1",  0.0f,  360.0f,  0.0f,  "deg", 0, S::linear,      false, "Where the cycle starts", "Dónde empieza el ciclo", 1.0f },
+        { "lfo2Rate",  "LFO 2 rate",  "Vel. LFO 2",  0.01f, 20.0f,   0.2f,  "Hz",  2, S::logarithmic, false, "Speed of the free LFO", "Velocidad del LFO libre" },
+        { "lfo2Phase", "LFO 2 phase", "Fase LFO 2",  0.0f,  360.0f,  0.0f,  "deg", 0, S::linear,      false, "Where the cycle starts", "Dónde empieza el ciclo", 1.0f },
+        { "envAttack", "ENV attack",  "Ataque ENV",  1.0f,  5000.0f, 10.0f, "ms",  0, S::logarithmic, false, "Rise of the envelope, from the start of each slice", "Subida de la envolvente, desde el comienzo de cada rebanada" },
+        { "envHold",   "ENV hold",    "Sostén ENV",  0.0f,  5000.0f, 0.0f,  "ms",  0, S::skewed,      false, "Time at the top", "Tiempo arriba" },
+        { "envDecay",  "ENV decay",   "Caída ENV",   5.0f,  10000.0f, 300.0f, "ms", 0, S::logarithmic, false, "Fall of the envelope back to zero", "Bajada de la envolvente hasta cero" },
+    };
+    return specs;
+}
+
+inline const FloatSpec& routeAmountSpec()
+{
+    static const FloatSpec s { "amt", "Amount", "Cantidad", -100.0f, 100.0f, 0.0f, "%", 0, FloatSpec::linear, true,
+                               "How far the source moves the knob (of its whole range)", "Cuánto mueve la fuente a la perilla (de todo su recorrido)", 1.0f };
+    return s;
+}
+
+inline juce::String groupLetter (int g) { return juce::String::charToString ((juce::juce_wchar) ('A' + juce::jlimit (0, numGroups - 1, g))); }
+// "gA_lfo1Rate", "gB_r3Src" …, and "lr2Amt" for the loop routes
+inline juce::String groupId (int g, const juce::String& base) { return "g" + groupLetter (g) + "_" + base; }
+inline juce::String groupRouteId (int g, int r, const char* what) { return groupId (g, "r" + juce::String (r + 1) + what); }
+inline juce::String loopRouteId (int r, const char* what) { return "lr" + juce::String (r + 1) + what; }
+
+inline const juce::StringArray& groupSourceChoices() { static const juce::StringArray c { "None", "LFO 1", "LFO 2", "ENV", "RND" }; return c; }
+inline const juce::StringArray& loopSourceChoices()
+{
+    static const juce::StringArray c = [] {
+        juce::StringArray a { "None" };
+        for (int g = 0; g < numGroups; ++g) for (int l = 0; l < 2; ++l) a.add (groupLetter (g) + " LFO " + juce::String (l + 1));
+        return a;
+    } ();
+    return c;
+}
+inline const juce::StringArray& lfoShapeChoices() { static const juce::StringArray c { "Sine", "Triangle", "Saw", "Square", "Steps", "Smooth" }; return c; }
+inline juce::StringArray divisionChoices()
+{
+    juce::StringArray c;
+    for (int i = 0; i < modlib::numDivisions; ++i) c.add (modlib::divisionName (i));
+    return c;
+}
+
+// Destinations, in the engine's order (VoiceDest / LoopDest). key: the knob they belong to.
+struct DestInfo { const char* key; bool slice; const char* en; const char* es; };
+inline const std::vector<DestInfo>& voiceDestinations()
+{
+    static const std::vector<DestInfo> d {
+        { "pitch", true, "Pitch", "Altura" }, { "fine", true, "Fine", "Fino" }, { "level", true, "Slice level", "Nivel reb." },
+        { "pan", true, "Pan", "Paneo" }, { "decay", true, "Slice decay", "Caída reb." }, { "filter", true, "Slice filter", "Filtro reb." },
+        { "attack", false, "Attack", "Ataque" }, { "decay", false, "Decay", "Caída" }, { "sustain", false, "Sustain", "Sostén" },
+        { "release", false, "Release", "Extinción" }, { "cutoff", false, "Cutoff", "Corte" }, { "reso", false, "Reso", "Reson." },
+    };
+    return d;
+}
+inline const std::vector<DestInfo>& loopDestinations()
+{
+    static const std::vector<DestInfo> d {
+        { "repeat", false, "Repeat", "Repetir" }, { "chance", false, "Chance", "Azar" }, { "rate", false, "Rate", "Velocidad" },
+        { "transpose", false, "Transpose", "Transp." }, { "level", false, "Loop level", "Nivel loop" },
+        { "lfoRate", false, "LFO rate", "Vel. LFO" }, { "lfoDepth", false, "LFO depth", "Prof. LFO" },
+    };
+    return d;
+}
+// Which destination a knob is: slice knobs by their slice id, loop knobs by their base id.
+inline int voiceDestOf (const juce::String& key, bool sliceKnob)
+{
+    const auto& d = voiceDestinations();
+    for (int i = 0; i < (int) d.size(); ++i) if (key == d[(size_t) i].key && d[(size_t) i].slice == sliceKnob) return i;
+    return -1;
+}
+inline int loopDestOf (const juce::String& key)
+{
+    const auto& d = loopDestinations();
+    for (int i = 0; i < (int) d.size(); ++i) if (key == d[(size_t) i].key) return i;
+    return -1;
+}
+
 inline const FloatSpec& findSpec (const std::vector<FloatSpec>& list, const juce::String& id)
 {
     for (const auto& s : list) if (id == s.id) return s;
@@ -90,10 +175,19 @@ inline const FloatSpec& findSpec (const std::vector<FloatSpec>& list, const juce
 }
 // Host parameters of each loop are called "L1_cutoff" … "L8_cutoff".
 inline juce::String loopId (int slot, const char* base) { return "L" + juce::String (slot + 1) + "_" + base; }
-inline juce::String baseId (const juce::String& id) { return id.startsWith ("L") && id.containsChar ('_') ? id.fromFirstOccurrenceOf ("_", false, false) : id; }
+inline juce::String baseId (const juce::String& id) { return (id.startsWith ("L") || id.startsWith ("g")) && id.containsChar ('_') ? id.fromFirstOccurrenceOf ("_", false, false) : id; }
 inline bool isGlobal (const juce::String& id) { return id == "gain" || id == "tempo" || id == "play" || id == "switchAt"; }
 
-inline const FloatSpec& spec (const juce::String& id)      { return findSpec (floatSpecs(), baseId (id)); }
+inline const FloatSpec& spec (const juce::String& id)
+{
+    const auto b = baseId (id);
+    if ((id.startsWith ("g") && id.containsChar ('_')) || id.startsWith ("lr"))
+    {
+        for (const auto& s : modSpecs()) if (b == s.id) return s;
+        return routeAmountSpec();
+    }
+    return findSpec (floatSpecs(), b);
+}
 inline const FloatSpec& sliceSpec (const juce::String& id) { return findSpec (sliceSpecs(), id); }
 
 inline const juce::StringArray& modeChoices()    { static const juce::StringArray c { "Sync", "Free" }; return c; }
@@ -112,6 +206,8 @@ inline juce::String formatValue (const FloatSpec& s, float v)
         return v >= 1000.0f ? juce::String (v / 1000.0f, v >= 10000.0f ? 1 : 2) + " kHz" : juce::String (juce::roundToInt (v)) + " Hz";
     }
     if (id == "decay" && std::abs (s.max - decayFull) < 0.5f && v >= decayFull - 0.5f) return "Full";
+    if (id == "div") return modlib::divisionName (juce::roundToInt (v));
+    if (unit == "deg") return juce::String (juce::roundToInt (v)) + juce::String::fromUTF8 ("°");
     if (id == "pan")
     {
         const int p = juce::roundToInt (v);
@@ -191,6 +287,44 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
         }
         layout.add (std::move (group));
     }
+
+    // modulation, added in 0.3
+    const int v3 = 3;
+    juce::StringArray voiceNames, loopNames;
+    for (const auto& d : voiceDestinations()) voiceNames.add (u8 (d.en));
+    for (const auto& d : loopDestinations()) loopNames.add (u8 (d.en));
+    for (int g = 0; g < numGroups; ++g)
+    {
+        const juce::String letter = groupLetter (g), prefix = letter + " ";
+        auto group = std::make_unique<juce::AudioProcessorParameterGroup> ("mod" + letter, "Mod group " + letter, "|");
+        for (int l = 1; l <= 2; ++l)
+        {
+            const juce::String n (l);
+            group->addChild (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { groupId (g, "lfo" + n + "Shape"), v3 }, prefix + "LFO " + n + " shape", lfoShapeChoices(), 0));
+            group->addChild (std::make_unique<juce::AudioParameterBool>   (juce::ParameterID { groupId (g, "lfo" + n + "Sync"), v3 },  prefix + "LFO " + n + " sync", false));
+            group->addChild (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { groupId (g, "lfo" + n + "Div"), v3 },   prefix + "LFO " + n + " division", divisionChoices(), 4));
+        }
+        for (const auto& s : modSpecs()) group->addChild (floatParam (groupId (g, s.id), prefix + u8 (s.en), s, v3));
+        for (int r = 0; r < groupRoutes; ++r)
+        {
+            const juce::String n = prefix + "Route " + juce::String (r + 1);
+            group->addChild (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { groupRouteId (g, r, "Src"), v3 },  n + " source", groupSourceChoices(), 0));
+            group->addChild (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { groupRouteId (g, r, "Dest"), v3 }, n + " target", voiceNames, 0));
+            group->addChild (floatParam (groupRouteId (g, r, "Amt"), n + " amount", routeAmountSpec(), v3));
+        }
+        layout.add (std::move (group));
+    }
+    {
+        auto group = std::make_unique<juce::AudioProcessorParameterGroup> ("loopRoutes", "Loop routes", "|");
+        for (int r = 0; r < loopRoutes; ++r)
+        {
+            const juce::String n = "Loop route " + juce::String (r + 1);
+            group->addChild (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { loopRouteId (r, "Src"), v3 },  n + " source", loopSourceChoices(), 0));
+            group->addChild (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { loopRouteId (r, "Dest"), v3 }, n + " target", loopNames, 0));
+            group->addChild (floatParam (loopRouteId (r, "Amt"), n + " amount", routeAmountSpec(), v3));
+        }
+        layout.add (std::move (group));
+    }
     return layout;
 }
 
@@ -267,6 +401,34 @@ inline juce::String tr (Lang lang, const char* key)
         { "detectTip",   "Higher: more and softer attacks become slices", "Más alto: más ataques, y más suaves, se vuelven rebanadas" },
         { "barsTip",     "Loop length in bars, for sync mode", "Duración del loop en compases, para el modo sync" },
         { "openFile",    "Choose an audio file",          "Elegí un archivo de audio" },
+        // modulation
+        { "none",        "None",                          "Ninguna" },
+        { "group",       "Group",                         "Grupo" },
+        { "thisSlice",   "this slice",                    "esta rebanada" },
+        { "modWith",     "Modulate with",                 "Modular con" },
+        { "removeMod",   "Remove modulation",             "Quitar la modulación" },
+        { "showModPage", "Show the modulation page",      "Ver la página de modulación" },
+        { "rightClickMod", "Right-click: modulate",       "Clic derecho: modular" },
+        { "loopTab",     "Loop",                          "Loop" },
+        { "tabSound",    "sound and order",               "sonido y orden" },
+        { "tabMod",      "Modulation",                    "Modulación" },
+        { "modGroup",    "Mod group",                     "Grupo mod." },
+        { "showMod",     "Modulation",                    "Modulación" },
+        { "showModTip",  "Open the modulation page at this slice's group", "Abrir la página de modulación en el grupo de esta rebanada" },
+        { "modGroupTip", "The slice belongs to this group: the group's LFOs, ENV and RND move its sound", "La rebanada pertenece a este grupo: los LFO, la ENV y el RND del grupo mueven su sonido" },
+        { "sliceInGroup", "slice in group",               "rebanada en el grupo" },
+        { "slicesInGroup", "slices in group",             "rebanadas en el grupo" },
+        { "loopRoutesInfo", "The groups' LFOs move how the loop plays", "Los LFO de los grupos mueven cómo toca el loop" },
+        { "routes",      "Routes",                        "Rutas" },
+        { "routesGroup", "the sound of the group's slices", "el sonido de las rebanadas del grupo" },
+        { "routesLoop",  "how the loop plays",            "cómo toca el loop" },
+        { "lfoHelp",     "A slow oscillator shared by the group: free (Hz) or locked to the tempo", "Un oscilador lento para todo el grupo: libre (Hz) o atado al tempo" },
+        { "envHelp",     "Starts again with every slice of the group", "Vuelve a empezar con cada rebanada del grupo" },
+        { "rndHelp",     "A new random value, -1 to +1, for every slice", "Un valor al azar nuevo, de -1 a +1, para cada rebanada" },
+        { "rndMore",     "Each slice of the group gets its own value when it starts. Send it to Pitch, Pan or Cutoff for slices that never sound twice the same.", "Cada rebanada del grupo recibe su propio valor al empezar. Mandalo a Altura, Paneo o Corte para rebanadas que nunca suenan dos veces igual." },
+        { "loopHelp",    "These routes move the settings of the loop that plays. Repeat, Chance and Rate are read at every step of the sequencer.", "Estas rutas mueven los ajustes del loop que suena. Repetir, Azar y Velocidad se leen en cada paso del secuenciador." },
+        { "shapeTip",    "Shape of the LFO",              "Forma del LFO" },
+        { "syncTip",     "Free: speed in Hz. Sync: one cycle lasts the chosen division of the host tempo", "Libre: velocidad en Hz. Sync: un ciclo dura la división elegida del tempo" },
     };
     for (const auto& e : table)
         if (std::strcmp (e.key, key) == 0) return u8 (lang == Lang::es ? e.es : e.en);
@@ -278,6 +440,9 @@ inline juce::String localValue (juce::String t, Lang lang)
 {
     if (lang == Lang::es)
     {
+        if (t == "4 bars") return u8 ("4 compases");
+        if (t == "2 bars") return u8 ("2 compases");
+        if (t == "1 bar") return u8 ("1 compás");
         if (t == "Open") return tr (lang, "open");
         if (t == "Full") return tr (lang, "full");
         if (t.length() > 1 && juce::CharacterFunctions::isDigit (t[1]))

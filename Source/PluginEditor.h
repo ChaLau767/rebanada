@@ -27,6 +27,12 @@ namespace colours
     const juce::Colour keyBlack    { 0xff2e2a26 };
     const juce::Colour keyBlackEdge{ 0xff45403a };
     const juce::Colour reverse     { 0xff9db4ff };
+    const juce::Colour loopMod     { 0xffede6d6 };   // loop routes
+    inline juce::Colour group (int g)
+    {
+        static const juce::Colour c[] { juce::Colour (0xfff0a640), juce::Colour (0xff7fd1b9), juce::Colour (0xffe8635a), juce::Colour (0xffc49bff) };
+        return c[juce::jlimit (0, 3, g)];
+    }
 }
 
 juce::Font sans (float height);    // Archivo regular
@@ -45,7 +51,7 @@ public:
     void drawButtonBackground (juce::Graphics&, juce::Button&, const juce::Colour&, bool over, bool down) override;
     void drawButtonText (juce::Graphics&, juce::TextButton&, bool over, bool down) override;
     void drawComboBox (juce::Graphics&, int w, int h, bool down, int bx, int by, int bw, int bh, juce::ComboBox&) override;
-    juce::Font getComboBoxFont (juce::ComboBox&) override { return mono (12.5f); }
+    juce::Font getComboBoxFont (juce::ComboBox& b) override { return mono (b.getProperties().getWithDefault ("small", false) ? 11.5f : 12.5f); }
     void positionComboBoxText (juce::ComboBox&, juce::Label&) override;
     juce::Font getPopupMenuFont() override { return sans (14.0f); }
     void drawTooltip (juce::Graphics&, const juce::String&, int w, int h) override;
@@ -53,22 +59,42 @@ public:
 };
 
 //==============================================================================
-// A rotary control with its name and value underneath.
+// A slider that leaves the right click to the modulation menu.
+class ModSlider : public juce::Slider
+{
+public:
+    std::function<void()> onPopup;
+    void mouseDown (const juce::MouseEvent& e) override { if (e.mods.isPopupMenu()) { if (onPopup) onPopup(); return; } Slider::mouseDown (e); }
+    void mouseDrag (const juce::MouseEvent& e) override { if (! e.mods.isPopupMenu()) Slider::mouseDrag (e); }
+    void mouseUp (const juce::MouseEvent& e) override   { if (! e.mods.isPopupMenu()) Slider::mouseUp (e); }
+};
+
+// A rotary control with its name and value underneath. When something modulates it,
+// an outer arc shows how far it can move and a dot where it is now.
 class Knob : public juce::Component
 {
 public:
     Knob (const FloatSpec&, bool bipolar);
     void paint (juce::Graphics&) override;
+    void paintOverChildren (juce::Graphics&) override;
     void resized() override;
     void setLanguage (Lang);
+    void setNames (const char* en, const char* es) { nameEn = en; nameEs = es; repaint(); }
     void attach (juce::AudioProcessorValueTreeState&, const juce::String& paramId);   // for host parameters
-    juce::Slider slider;
+    void setModulation (float depth, float offset, juce::Colour, const juce::String& badge);
+    ModSlider slider;
     std::function<void (float)> onChange;                  // for slice settings
+    std::function<void()> onModMenu;                       // right click
     static constexpr int width = 72, dial = 54, height = 88;
 
 private:
     const FloatSpec& spec;
     Lang lang = Lang::en;
+    const char* nameEn = nullptr;
+    const char* nameEs = nullptr;
+    float modDepth = 0.0f, modOffset = 0.0f;
+    juce::Colour modColour;
+    juce::String modBadge;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> attachment;
 };
 
@@ -83,6 +109,7 @@ public:
     void setPlainLabels (bool plain) { plainLabels = plain; }
     float fontSize = 12.5f;
     bool monoFont = false, capsLabels = false;
+    juce::Colour onColour = colours::accent;
 
 private:
     int indexAt (juce::Point<float>) const;
@@ -224,6 +251,84 @@ private:
     Lang lang = Lang::en;
 };
 
+// The four modulation groups, as coloured letters: the group of the selected slice.
+class GroupPicker : public juce::Component, public juce::SettableTooltipClient
+{
+public:
+    GroupPicker() { setMouseCursor (juce::MouseCursor::PointingHandCursor); }
+    void paint (juce::Graphics&) override;
+    void mouseDown (const juce::MouseEvent& e) override;
+    int value = 0;
+    std::function<void (int)> onPick;
+};
+
+// The six LFO shapes.
+class ShapePicker : public juce::Component, public juce::SettableTooltipClient
+{
+public:
+    ShapePicker() { setMouseCursor (juce::MouseCursor::PointingHandCursor); }
+    void paint (juce::Graphics&) override;
+    void mouseDown (const juce::MouseEvent&) override;
+    juce::RangedAudioParameter* param = nullptr;
+    juce::Colour colour = colours::accent;
+};
+
+// One route: source → destination, and how much.
+class RouteRow : public juce::Component
+{
+public:
+    explicit RouteRow (RebanadaProcessor&);
+    void attach (int group, int index);   // group -1: a loop route
+    void paint (juce::Graphics&) override;
+    void resized() override;
+    void setLanguage (Lang);
+    juce::ComboBox source, target;
+    juce::Slider amount;
+    juce::Colour colour = colours::accent;
+
+private:
+    juce::String id (const char* what) const;
+    RebanadaProcessor& processor;
+    int group = 0, index = 0;
+    Lang lang = Lang::en;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> sourceAttachment, targetAttachment;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> amountAttachment;
+};
+
+// The modulation page: a group's sources and routes, or the loop routes.
+class ModPage : public juce::Component
+{
+public:
+    explicit ModPage (RebanadaProcessor&);
+    void paint (juce::Graphics&) override;
+    void resized() override;
+    void mouseDown (const juce::MouseEvent&) override;
+    void setLanguage (Lang);
+    void update (const Telemetry&, int sliceGroup, const std::array<int, numGroups>& members);
+    void showTarget (int t);              // 0 … 3 a group, 4 the loop routes
+    int getTarget() const { return target; }
+    void showSourceForCapture (int s) { showSource (s); }
+    static constexpr int loopTarget = numGroups;
+
+private:
+    void showSource (int s);
+    void attachControls();
+    juce::Rectangle<int> tabArea (int t) const;
+    juce::Rectangle<float> previewArea() const { return { 252.0f, 120.0f, 104.0f, 80.0f }; }
+    juce::Colour colour() const { return target == loopTarget ? colours::loopMod : colours::group (target); }
+    void paintPreview (juce::Graphics&);
+
+    RebanadaProcessor& processor;
+    Lang lang = Lang::en;
+    int target = 0, source = 0;          // source: 0 LFO 1, 1 LFO 2, 2 ENV, 3 RND
+    Segmented sources, sync;
+    ShapePicker shapes;
+    Knob rate, division, phase, envAttack, envHold, envDecay;
+    juce::OwnedArray<RouteRow> rows;
+    Telemetry tele;
+    std::array<int, numGroups> members {};
+};
+
 //==============================================================================
 class Content : public juce::Component, public juce::FileDragAndDropTarget, private juce::Timer
 {
@@ -233,7 +338,10 @@ public:
     void paint (juce::Graphics&) override;
     void resized() override;
     void mouseDown (const juce::MouseEvent&) override;
-    static constexpr int baseWidth = 1200, baseHeight = 780;
+    static constexpr int baseWidth = 1200, baseHeight = 810;
+    void showPage (int page);               // 0 the loop's sound and order, 1 modulation
+    void showModTarget (int t) { modPage.showTarget (t); }   // for the capture tool
+    void showModSource (int src) { modPage.showSourceForCapture (src); }
 
     bool isInterestedInFileDrag (const juce::StringArray&) override;
     void filesDropped (const juce::StringArray&, int x, int y) override;
@@ -252,6 +360,9 @@ private:
     void chooseFile (int slot);
     void loadInto (int slot, const juce::File&);
     void updateTexts();
+    void updateModulation();
+    void showModMenu (Knob&, int voiceDest, int loopDest, bool sliceKnob, const juce::String& name);
+    int sliceGroup() const;
 
     RebanadaProcessor& processor;
     LookAndFeel lnf;
@@ -277,6 +388,10 @@ private:
     Segmented filterSwitch, orderSwitch, stereoSwitch;
     juce::StringArray voiceIds, motionIds;
     KeyStrip keys;
+    juce::TextButton tabLoop, tabMod, showModButton;
+    GroupPicker groupPicker;
+    ModPage modPage;
+    int page = 0, shownGroup = -1;
 
     std::unique_ptr<juce::FileChooser> chooser;
     RebanadaProcessor::SlotInfo info;

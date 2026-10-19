@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <memory>
 #include <vector>
+#include "Modulation.h"
 
 namespace rebanada
 {
@@ -27,6 +28,76 @@ constexpr int maxOutputs = 64;     // output channels
 constexpr int slotBaseNote  = 12;  // C0 … G0 choose the loop (middle C = C4 = 60)
 constexpr int sliceBaseNote = 36;  // C2 plays slice 1
 constexpr float decayFull = 2000.0f;   // slice decay at its maximum: the slice plays to its end
+
+// Modulation (Rebanada 0.3): every slice belongs to one of four groups. Each group has two LFOs,
+// an envelope (ENV, started by every slice) and a random value per slice (RND), routed to the
+// sound of its slices. Loop routes send the groups' LFOs to how the loop plays.
+constexpr int numGroups = 4;
+constexpr int groupRoutes = 6;
+constexpr int loopRoutes = 4;
+enum ModSource { srcNone = 0, srcLfo1, srcLfo2, srcEnv, srcRnd, numModSources };
+// What a group route can move: the slice's own knobs and the loop's envelope and filter
+// (append only: sessions store the index). Times are read when a slice starts; the rest moves all the time.
+enum VoiceDest { vdPitch = 0, vdFine, vdLevel, vdPan, vdSliceDecay, vdFilter,
+                 vdAttack, vdDecay, vdSustain, vdRelease, vdCutoff, vdReso, numVoiceDests };
+// What a loop route can move (read at every step for repeat, chance and rate).
+enum LoopDest { ldRepeat = 0, ldChance, ldRate, ldTranspose, ldLevel, ldLfoRate, ldLfoDepth, numLoopDests };
+constexpr int numLoopSources = numGroups * 2;   // the LFOs of every group
+
+struct ModRoute
+{
+    int source = 0;       // group route: ModSource; loop route: 0 none, 1 + group * 2 + lfo
+    int dest = 0;
+    float amount = 0.0f;  // -1 … +1 of the knob's range
+};
+
+struct GroupMod
+{
+    int shape[2] { 0, 0 };
+    bool sync[2] { false, false };
+    float rate[2] { 0.5f, 0.2f };     // Hz
+    int division[2] { 4, 4 };         // modlib division index
+    float phase[2] { 0.0f, 0.0f };    // 0…1
+    float envAttack = 10.0f, envHold = 0.0f, envDecay = 300.0f;   // ms
+    ModRoute routes[groupRoutes];
+};
+
+// The knob ranges, the same curves as the host parameters and the slice knobs.
+inline const modlib::Range& voiceRange (int d) noexcept
+{
+    using R = modlib::Range;
+    static const R r[numVoiceDests] {
+        { R::linear, -24.0f, 24.0f, 1.0f },          // pitch, st
+        { R::linear, -50.0f, 50.0f, 1.0f },          // fine, ct
+        { R::linear, -36.0f, 6.0f, 1.0f },           // slice level, dB
+        { R::linear, -1.0f, 1.0f, 1.0f },            // pan
+        { R::logarithmic, 10.0f, decayFull, 1.0f },  // slice decay, ms
+        { R::linear, -4.0f, 4.0f, 1.0f },            // filter, oct
+        { R::skewed, 0.0f, 1000.0f, 0.30103f },      // attack (skew for a centre at 10 %)
+        { R::logarithmic, 5.0f, 5000.0f, 1.0f },     // decay
+        { R::linear, 0.0f, 100.0f, 1.0f },           // sustain
+        { R::logarithmic, 5.0f, 5000.0f, 1.0f },     // release
+        { R::logarithmic, 20.0f, 20000.0f, 1.0f },   // cutoff
+        { R::linear, 0.0f, 100.0f, 1.0f },           // reso
+    };
+    return r[std::clamp (d, 0, numVoiceDests - 1)];
+}
+inline bool voiceDestAtStart (int d) noexcept { return d == vdSliceDecay || (d >= vdAttack && d <= vdRelease); }
+
+inline const modlib::Range& loopRange (int d) noexcept
+{
+    using R = modlib::Range;
+    static const R r[numLoopDests] {
+        { R::linear, 0.0f, 100.0f, 1.0f },           // repeat
+        { R::linear, 0.0f, 100.0f, 1.0f },           // chance
+        { R::logarithmic, 0.25f, 4.0f, 1.0f },       // rate
+        { R::linear, -24.0f, 24.0f, 1.0f },          // transpose
+        { R::linear, -36.0f, 12.0f, 1.0f },          // level
+        { R::logarithmic, 0.02f, 20.0f, 1.0f },      // motion LFO rate
+        { R::linear, 0.0f, 100.0f, 1.0f },           // motion LFO depth
+    };
+    return r[std::clamp (d, 0, numLoopDests - 1)];
+}
 
 struct Sample
 {
@@ -47,6 +118,7 @@ struct SliceParams
     bool mute    = false;
     int  out     = 0;          // first output channel (0 = channel 1)
     bool stereo  = true;       // a pair (out, out + 1) or a single mono channel
+    int  group   = 0;          // modulation group, 0 … 3 (A … D)
 };
 
 struct Slot
@@ -89,6 +161,8 @@ struct Params
     float gain = 0.0f;       // dB, all loops
     float tempo = 120.0f;    // internal tempo when there is no host transport
     std::array<LoopParams, maxSlots> loops {};
+    std::array<GroupMod, numGroups> groups {};
+    ModRoute loopRoute[loopRoutes];
 };
 
 // What the host says about time. When there is no host transport (standalone app),
@@ -121,6 +195,9 @@ struct Telemetry
     float voicePos[16] {};           // playing positions in the current slot, 0…1 of the sample
     float sliceLevel[maxSlices] {};  // how loud each slice of the current slot sounds now
     float outPeak = 0.0f;
+    float groupLfo[numGroups][2] {};             // current LFO values, -1…+1
+    float groupOffset[numGroups][numVoiceDests] {};  // how far the newest slice of each group is moved now
+    float loopOffset[numLoopDests] {};           // how far the loop routes move each loop setting now
 };
 
 //==============================================================================
@@ -170,7 +247,10 @@ public:
         lastPlayed = -1;
         loopVoice = -1;
         internalPpq = 0.0;
+        syncPpq = 0.0;
         smoothedGain = -1.0f;
+        for (int g = 0; g < numGroups; ++g)
+            for (int l = 0; l < 2; ++l) lfos[g][l].reset (0x51ed27u + (uint32_t) (g * 2 + l) * 0x9e3779b9u);
     }
 
     // Loop requested from the interface or from a note between C0 and G0.
@@ -191,13 +271,50 @@ public:
         if (slot == currentSlot) { loopVoice = -1; lastPlayed = -1; }
     }
 
+    // Long blocks are cut into pieces of maxChunk samples, so the modulation stays smooth.
     void process (float* const* out, int numOut, int n, const Params& p, const Clock& clock,
                   const Event* events, int numEvents)
+    {
+        numOut = std::min (numOut, maxOutputs);
+        if (n <= maxChunk) { processChunk (out, numOut, n, p, clock, events, numEvents); return; }
+
+        const double bpm = clock.hostAvailable && clock.bpm > 1.0 ? clock.bpm : p.tempo;
+        int done = 0, ei = 0;
+        while (done < n)
+        {
+            const int m = std::min (maxChunk, n - done);
+            const bool last = done + m >= n;
+            int count = 0;
+            while (ei + count < numEvents && (last || events[ei + count].offset < done + m)) ++count;
+            const int used = std::min (count, (int) chunkEvents.size());
+            for (int k = 0; k < used; ++k)
+            {
+                chunkEvents[(size_t) k] = events[ei + k];
+                chunkEvents[(size_t) k].offset = std::clamp (events[ei + k].offset - done, 0, m - 1);
+            }
+            Clock c = clock;
+            if (c.hostAvailable && c.hostPlaying) c.ppq += bpm / 60.0 / sr * done;
+            float* ptrs[maxOutputs];
+            for (int ch = 0; ch < numOut; ++ch) ptrs[ch] = out[ch] + done;
+            processChunk (ptrs, numOut, m, p, c, chunkEvents.data(), used);
+            ei += count;
+            done += m;
+        }
+    }
+
+private:
+    static constexpr int maxChunk = 1024;
+    static constexpr int maxTicks = maxChunk / 32 + 1;
+
+    void processChunk (float* const* out, int numOut, int n, const Params& p, const Clock& clock,
+                       const Event* events, int numEvents)
     {
         for (int ch = 0; ch < numOut; ++ch) std::fill (out[ch], out[ch] + n, 0.0f);
         if (n <= 0 || numOut <= 0) return;
 
         params = p;
+        advanceLfos (n, clock);
+        applyLoopRoutes();
         scheduleSequencer (n, clock);
 
         // merge the sequencer's actions and the incoming notes, in time order
@@ -212,10 +329,12 @@ public:
             render (out, numOut, done, next);
             done = next;
             if (done >= n) break;
+            curOffset = done;
 
             while (si < numActions && actions[(size_t) si].offset <= done) apply (actions[(size_t) si++]);
             while (ei < numEvents && std::clamp (events[ei].offset, 0, n - 1) <= done) handle (events[ei++]);
         }
+        curOffset = n - 1;
         while (si < numActions) apply (actions[(size_t) si++]);
         while (ei < numEvents) handle (events[ei++]);
 
@@ -237,10 +356,11 @@ public:
         }
         smoothedGain = target;
         for (int l = 0; l < maxSlots; ++l)
-            lfoPhase[(size_t) l] = std::fmod (lfoPhase[(size_t) l] + (double) p.loops[(size_t) l].lfoRate * n / sr, 1.0);
+            lfoPhase[(size_t) l] = std::fmod (lfoPhase[(size_t) l] + (double) params.loops[(size_t) l].lfoRate * n / sr, 1.0);
         peakSinceSnapshot = std::max (peakSinceSnapshot, peak);
     }
 
+public:
     void snapshot (Telemetry& t) noexcept
     {
         t.currentSlot = currentSlot;
@@ -252,6 +372,15 @@ public:
         t.outPeak = std::max (t.outPeak, peakSinceSnapshot);
         peakSinceSnapshot = 0.0f;
         std::fill (std::begin (t.sliceLevel), std::end (t.sliceLevel), 0.0f);
+        for (int g = 0; g < numGroups; ++g)
+        {
+            for (int l = 0; l < 2; ++l) t.groupLfo[g][l] = lfoVal[g][l][0];
+            const Voice* newest = nullptr;
+            for (const auto& v : voices)
+                if (v.active && v.group == g && v.stage != 3 && (newest == nullptr || v.age - newest->age < 0x80000000u)) newest = &v;
+            for (int d = 0; d < numVoiceDests; ++d) t.groupOffset[g][d] = newest != nullptr ? newest->offs[d] : 0.0f;
+        }
+        for (int d = 0; d < numLoopDests; ++d) t.loopOffset[d] = loopOff[d];
         t.numVoicePos = 0;
         const Slot& slot = slots[(size_t) currentSlot];
         for (const auto& v : voices)
@@ -291,15 +420,127 @@ private:
         int stage = 0;            // 0 attack, 1 decay, 2 sustain, 3 release
         float env = 0.0f, releaseStep = 0.0f;
         float decayMul = 1.0f, decayLevel = 1.0f;
-        float gain = 1.0f, pan = 0.0f, filterOct = 0.0f, pitch = 0.0f;
+        float velGain = 1.0f;
+        float slicePitch = 0.0f, fine = 0.0f, levelDb = 0.0f, pan = 0.0f, filterOct = 0.0f;   // the slice's knobs
+        float attackS = 1.0f, decayS = 1.0f, sustain = 1.0f, releaseMs = 40.0f;   // read when it starts
         int out = 0;
         bool stereo = true;
         uint32_t age = 0;
+        int group = 0;
+        float rnd = 0.0f;              // RND: one value per slice
+        uint32_t elapsed = 0;          // samples since it started (ENV)
+        float offs[numVoiceDests] {};  // how far each destination is moved now
         // per-voice filter (state-variable, trapezoidal)
         float s1L = 0, s2L = 0, s1R = 0, s2R = 0;
         float a1 = 1, a2 = 0, a3 = 0, k = 1.4f, open = 1.0f;
         float inc = 1.0f, gL = 1.0f, gR = 1.0f;
     };
+
+    //--------------------------------------------------------------------------
+    // The groups' LFOs, one value every 32 samples of this block.
+    void advanceLfos (int n, const Clock& clock)
+    {
+        const double bpm = clock.hostAvailable && clock.bpm > 1.0 ? clock.bpm : params.tempo;
+        const double qps = bpm / 60.0 / sr;
+        if (clock.hostAvailable && clock.hostPlaying) syncPpq = clock.ppq;
+        numTicks = std::clamp ((n + 31) / 32, 1, maxTicks);
+        for (int g = 0; g < numGroups; ++g)
+        {
+            const GroupMod& gm = params.groups[(size_t) g];
+            for (int l = 0; l < 2; ++l)
+            {
+                modlib::Lfo& lfo = lfos[g][l];
+                lfo.shape = std::clamp (gm.shape[l], 0, modlib::numShapes - 1);
+                lfo.phaseOffset = std::clamp (gm.phase[l], 0.0f, 1.0f);
+                for (int t = 0; t < numTicks; ++t)
+                {
+                    const int len = std::min (32, n - t * 32);
+                    if (gm.sync[l])
+                        lfoVal[g][l][t] = lfo.syncTo (syncPpq + qps * t * 32, modlib::divisionQuarters (gm.division[l]));
+                    else
+                    {
+                        lfoVal[g][l][t] = t == 0 ? lfo.advanceFree (0.0) : lfo.getValue();
+                        lfo.advanceFree ((double) std::max (0.0f, gm.rate[l]) * std::max (0, len) / sr);
+                    }
+                }
+            }
+        }
+        syncPpq += qps * n;
+    }
+
+    int tickAt (int i) const noexcept { return std::clamp (i >> 5, 0, numTicks - 1); }
+
+    static float& loopField (LoopParams& lp, int d) noexcept
+    {
+        switch (d)
+        {
+            case ldRepeat:    return lp.repeat;
+            case ldChance:    return lp.chance;
+            case ldRate:      return lp.rate;
+            case ldTranspose: return lp.transpose;
+            case ldLevel:     return lp.level;
+            case ldLfoRate:   return lp.lfoRate;
+            default:          return lp.lfoDepth;
+        }
+    }
+
+    // Loop routes move the settings of every loop, from the value of their LFO at the start of the block.
+    void applyLoopRoutes() noexcept
+    {
+        std::fill (std::begin (loopOff), std::end (loopOff), 0.0f);
+        for (const auto& r : params.loopRoute)
+        {
+            if (r.source <= 0 || r.source > numLoopSources || r.amount == 0.0f || r.dest < 0 || r.dest >= numLoopDests) continue;
+            const int g = (r.source - 1) / 2, l = (r.source - 1) % 2;
+            loopOff[r.dest] += lfoVal[g][l][0] * std::clamp (r.amount, -1.0f, 1.0f);
+        }
+        for (int d = 0; d < numLoopDests; ++d)
+        {
+            if (loopOff[d] == 0.0f) continue;
+            for (auto& lp : params.loops)
+            {
+                float& f = loopField (lp, d);
+                f = loopRange (d).apply (f, loopOff[d]);
+            }
+        }
+    }
+
+    float envValue (const Voice& v, const GroupMod& gm) const noexcept
+    {
+        float t = (float) v.elapsed * 1000.0f / (float) sr;
+        const float a = std::max (0.1f, gm.envAttack);
+        if (t < a) return t / a;
+        t -= a;
+        if (t < gm.envHold) return 1.0f;
+        t -= std::max (0.0f, gm.envHold);
+        return std::max (0.0f, 1.0f - t / std::max (1.0f, gm.envDecay));
+    }
+
+    // How far the group's routes move each destination of this voice, now.
+    void voiceOffsets (const Voice& v, int tick, float* offs) const noexcept
+    {
+        std::fill (offs, offs + numVoiceDests, 0.0f);
+        const int g = std::clamp (v.group, 0, numGroups - 1);
+        const GroupMod& gm = params.groups[(size_t) g];
+        for (const auto& r : gm.routes)
+        {
+            if (r.source <= srcNone || r.source >= numModSources || r.amount == 0.0f || r.dest < 0 || r.dest >= numVoiceDests) continue;
+            float x = 0.0f;
+            switch (r.source)
+            {
+                case srcLfo1: x = lfoVal[g][0][tick]; break;
+                case srcLfo2: x = lfoVal[g][1][tick]; break;
+                case srcEnv:  x = envValue (v, gm); break;
+                default:      x = v.rnd; break;
+            }
+            offs[r.dest] += x * std::clamp (r.amount, -1.0f, 1.0f);
+        }
+    }
+
+    static float moved (int d, float base, const float* offs) noexcept
+    {
+        return offs[d] == 0.0f ? base : voiceRange (d).apply (base, offs[d]);
+    }
 
     //--------------------------------------------------------------------------
     // Works out, for this block, where the sequencer starts slices and changes loops.
@@ -617,7 +858,7 @@ private:
     {
         if (v.stage == 3) return;
         v.stage = 3;
-        const float samples = std::max (1.0f, params.loops[(size_t) v.slot].release * 0.001f * (float) sr);
+        const float samples = std::max (1.0f, v.releaseMs * 0.001f * (float) sr);
         v.releaseStep = std::max (v.env, 1.0e-4f) / samples;
     }
 
@@ -652,30 +893,53 @@ private:
         const double offset = std::min (startFrames, (double) (v.end - v.begin - 1));
         v.pos = v.reverse ? (double) v.end - 1.0 - offset : (double) v.begin + offset;
         v.baseInc = s.sample->sampleRate / sr;
-        v.pitch = sp.pitch + sp.fine * 0.01f;
-        v.gain = detail::dbToGain (sp.level) * detail::dbToGain (-24.0f * (1.0f - velocity));
+        v.slicePitch = sp.pitch;
+        v.fine = sp.fine;
+        v.levelDb = sp.level;
+        v.velGain = detail::dbToGain (-24.0f * (1.0f - velocity));
         v.pan = sp.pan;
         v.filterOct = sp.filter;
         v.out = std::clamp (sp.out, 0, maxOutputs - 1);
         v.stereo = sp.stereo;
+        v.group = std::clamp (sp.group, 0, numGroups - 1);
+        v.rnd = modRng.bipolar();
+        v.elapsed = 0;
         v.stage = 0;
         v.env = 0.0f;
         v.decayLevel = 1.0f;
-        v.decayMul = sp.decay >= decayFull - 0.5f ? 1.0f
-                   : std::pow (0.001f, 1.0f / std::max (1.0f, sp.decay * 0.001f * (float) sr));
         v.age = ++voiceCounter;
-        // starting in the middle of a slice (after a jump): skip the attack click
-        if (offset > 0.0) v.env = 0.0f;
-        updateControl (v, 0.0f);
+
+        // the times are read once, when the slice starts
+        const int tick = tickAt (curOffset);
+        voiceOffsets (v, tick, v.offs);
+        const LoopParams& lp = params.loops[(size_t) slotIndex];
+        const float attack  = moved (vdAttack, lp.attack, v.offs);
+        const float decay   = moved (vdDecay, lp.decay, v.offs);
+        v.sustain = std::clamp (moved (vdSustain, lp.sustain, v.offs) * 0.01f, 0.0f, 1.0f);
+        v.releaseMs = moved (vdRelease, lp.release, v.offs);
+        v.attackS = std::max (1.0f, std::max (1.0f, attack) * 0.001f * (float) sr);
+        v.decayS  = std::max (1.0f, decay * 0.001f * (float) sr);
+        const float sliceDecay = sp.decay >= decayFull - 0.5f && v.offs[vdSliceDecay] >= 0.0f ? decayFull
+                               : moved (vdSliceDecay, sp.decay, v.offs);
+        v.decayMul = sliceDecay >= decayFull - 0.5f ? 1.0f
+                   : std::pow (0.001f, 1.0f / std::max (1.0f, sliceDecay * 0.001f * (float) sr));
+        updateControl (v, 0.0f, tick);
         return index;
     }
 
-    // Pitch, filter and pan, refreshed every few samples.
-    void updateControl (Voice& v, float lfo) noexcept
+    // Pitch, level, pan and filter, refreshed every 32 samples.
+    void updateControl (Voice& v, float lfo, int tick) noexcept
     {
         const LoopParams& p = params.loops[(size_t) v.slot];
+        float offs[numVoiceDests];
+        voiceOffsets (v, tick, offs);
+        for (int d = 0; d < numVoiceDests; ++d) if (! voiceDestAtStart (d)) v.offs[d] = offs[d];
+
         const float depth = std::clamp (p.lfoDepth * 0.01f, 0.0f, 1.0f);
-        float pitch = v.pitch + p.transpose, oct = v.filterOct, pan = v.pan, amp = 1.0f;
+        float pitch = moved (vdPitch, v.slicePitch, offs) + moved (vdFine, v.fine, offs) * 0.01f + p.transpose;
+        float oct = moved (vdFilter, v.filterOct, offs);
+        float pan = moved (vdPan, v.pan, offs);
+        float amp = detail::dbToGain (moved (vdLevel, v.levelDb, offs)) * v.velGain;
         switch (p.lfoDest)
         {
             case 0: oct += lfo * depth * 3.0f; break;
@@ -687,12 +951,13 @@ private:
 
         pan = std::clamp (pan, -1.0f, 1.0f);
         amp *= detail::dbToGain (p.level);
-        v.gL = (pan <= 0.0f ? 1.0f : 1.0f - pan) * v.gain * amp;
-        v.gR = (pan >= 0.0f ? 1.0f : 1.0f + pan) * v.gain * amp;
+        v.gL = (pan <= 0.0f ? 1.0f : 1.0f - pan) * amp;
+        v.gR = (pan >= 0.0f ? 1.0f : 1.0f + pan) * amp;
 
-        const float fc = std::clamp (p.cutoff * std::pow (2.0f, oct), 20.0f, (float) (sr * 0.45));
+        const float cutoff = moved (vdCutoff, p.cutoff, offs);
+        const float fc = std::clamp (cutoff * std::pow (2.0f, oct), 20.0f, (float) (sr * 0.45));
         const float g = std::tan (3.14159265f * fc / (float) sr);
-        const float res = std::clamp (p.reso * 0.01f, 0.0f, 1.0f);
+        const float res = std::clamp (moved (vdReso, p.reso, offs) * 0.01f, 0.0f, 1.0f);
         v.k = 1.414f * (1.0f - res) + 0.06f * res;
         v.a1 = 1.0f / (1.0f + g * (g + v.k));
         v.a2 = g * v.a1;
@@ -711,9 +976,9 @@ private:
             Voice& v = voices[(size_t) vi];
             if (! v.active) continue;
             const LoopParams& p = params.loops[(size_t) v.slot];
-            const float attackSamples  = std::max (1.0f, std::max (1.0f, p.attack) * 0.001f * (float) sr);
-            const float decaySamples   = std::max (1.0f, p.decay * 0.001f * (float) sr);
-            const float sustain = std::clamp (p.sustain * 0.01f, 0.0f, 1.0f);
+            const float attackSamples = v.attackS;
+            const float decaySamples  = v.decayS;
+            const float sustain = v.sustain;
             const int type = p.filterType;
             const Sample* smp = v.smp;
             if (smp == nullptr || smp->length() < 2) { v.active = false; continue; }
@@ -740,8 +1005,9 @@ private:
                 if ((i & 31) == 0 || i == from)
                 {
                     const double ph = lfoPhase[(size_t) v.slot] + (double) p.lfoRate * i / sr;
-                    updateControl (v, (float) std::sin (ph * 6.283185307179586));
+                    updateControl (v, (float) std::sin (ph * 6.283185307179586), tickAt (i));
                 }
+                ++v.elapsed;
 
                 // envelope
                 switch (v.stage)
@@ -821,6 +1087,15 @@ private:
     std::array<double, maxSlots> lfoPhase {};
     float smoothedGain = -1.0f, peakSinceSnapshot = 0.0f;
     detail::Random rng;
+
+    // modulation
+    modlib::Lfo lfos[numGroups][2];
+    float lfoVal[numGroups][2][maxTicks] {};
+    int numTicks = 1, curOffset = 0;
+    double syncPpq = 0.0;
+    float loopOff[numLoopDests] {};
+    modlib::Random modRng;
+    std::array<Event, 512> chunkEvents {};
 };
 
 } // namespace rebanada

@@ -88,6 +88,20 @@ public:
     // A MIDI file with one note per slice, in the loop's order, for dragging onto a track.
     juce::File writeMidiFile (int slot);
 
+    // Modulation. Group routes: g 0…3, dest VoiceDest, source ModSource.
+    // Loop routes: dest LoopDest, source 1 + group * 2 + lfo.
+    int  groupSourceOf (int g, int dest) const;
+    float groupDepth (int g, int dest) const;           // 0…1: how far the routes can move it
+    void assignGroupMod (int g, int dest, int source);
+    void removeGroupMod (int g, int dest);
+    int  loopSourceOf (int dest) const;
+    float loopDepth (int dest) const;
+    void assignLoopMod (int dest, int source);
+    void removeLoopMod (int dest);
+    void setParam (const juce::String& id, float value);   // plain value, with a gesture
+    bool groupHasRoute (int g, int dest, int source) const;
+    bool loopHasRoute (int dest, int source) const;
+
     bool readTelemetry (rebanada::Telemetry& dest);
     int getVersion() const { return version.load(); }
     int numOutputs() const { return getTotalNumOutputChannels(); }
@@ -131,10 +145,19 @@ private:
         std::atomic<float> *chance, *repeat, *lfoRate, *lfoDepth, *attack, *decay, *sustain, *release, *cutoff, *reso,
                            *transpose, *rate, *level, *mode, *order, *lfoDest, *filterType;
     };
+    struct RouteRefs { std::atomic<float> *src = nullptr, *dest = nullptr, *amt = nullptr; };
+    struct GroupRefs
+    {
+        std::atomic<float> *shape[2] {}, *sync[2] {}, *div[2] {}, *rate[2] {}, *phase[2] {};
+        std::atomic<float> *envAttack = nullptr, *envHold = nullptr, *envDecay = nullptr;
+        std::array<RouteRefs, rebanada::groupRoutes> routes {};
+    };
     struct Refs
     {
         std::atomic<float> *gain = nullptr, *tempo = nullptr, *switchAt = nullptr, *play = nullptr;
         std::array<LoopRefs, rebanada::maxSlots> loops {};
+        std::array<GroupRefs, rebanada::numGroups> groups {};
+        std::array<RouteRefs, rebanada::loopRoutes> loopRoutes {};
     } refs;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (RebanadaProcessor)
